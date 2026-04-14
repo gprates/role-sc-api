@@ -6,12 +6,9 @@ await build({
   minify: true,
   platform: 'node',
   target: 'node24',
-  format: 'esm',
+  format: 'cjs',
   outdir: 'dist',
-  banner: {
-    js: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);",
-  },
-  external: ['bcrypt'],
+  external: [],
 });
 
 console.log('Build concluído → dist/handler.js');

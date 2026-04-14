@@ -1,4 +1,4 @@
-import bcrypt from 'bcrypt';
+import bcrypt from 'bcryptjs';
 import * as userRepo from '../database/repositories/user.repository.js';
 import { signToken } from '../utils/jwt.utils.js';
 import type { RegisterBody, LoginBody } from '../types/auth.types.js';
