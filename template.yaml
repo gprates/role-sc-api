@@ -1,0 +1,71 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'role-sc-api - API REST para eventos culturais e municipais de SC'
+
+Parameters:
+  MongoDbUri:
+    Type: String
+    Description: Connection string do MongoDB Atlas
+    NoEcho: true
+  MongoDbName:
+    Type: String
+    Description: Nome do banco de dados
+    Default: role_sc
+  JwtSecret:
+    Type: String
+    Description: Secret para assinar tokens JWT
+    NoEcho: true
+  JwtExpiresIn:
+    Type: String
+    Description: Tempo de expiração do token JWT
+    Default: 7d
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 256
+    Runtime: nodejs24.x
+
+Resources:
+  RoleScApi:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handler.handler
+      CodeUri: dist/
+      Description: API REST Fastify para o app Rolê SC
+      Environment:
+        Variables:
+          MONGODB_URI: !Ref MongoDbUri
+          MONGODB_DB_NAME: !Ref MongoDbName
+          JWT_SECRET: !Ref JwtSecret
+          JWT_EXPIRES_IN: !Ref JwtExpiresIn
+      Events:
+        ApiCatchAll:
+          Type: HttpApi
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+            ApiId: !Ref HttpApi
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: $default
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowHeaders:
+          - Authorization
+          - Content-Type
+        AllowMethods:
+          - GET
+          - POST
+          - OPTIONS
+
+Outputs:
+  ApiUrl:
+    Description: URL da API
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+  FunctionArn:
+    Description: ARN da Lambda
+    Value: !GetAtt RoleScApi.Arn

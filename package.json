@@ -1,0 +1,37 @@
+{
+  "name": "role-sc-api",
+  "version": "1.0.0",
+  "description": "API REST para o app Rolê SC — expõe eventos culturais e municipais via Fastify + AWS Lambda",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/invoke-local.ts",
+    "build": "node esbuild.config.js",
+    "start": "node dist/handler.js"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "bcrypt",
+      "esbuild"
+    ]
+  },
+  "dependencies": {
+    "@fastify/aws-lambda": "^6.4.0",
+    "@fastify/cors": "^11.2.0",
+    "bcrypt": "^6.0.0",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.8.5",
+    "jsonwebtoken": "^9.0.3",
+    "mongodb": "^7.1.1"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^25.6.0",
+    "esbuild": "^0.28.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}
