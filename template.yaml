@@ -27,9 +27,10 @@ Globals:
     Runtime: nodejs24.x
 
 Resources:
-  RoleScApi:
+  RoleScApiFunction:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: ROLE_SC_API
       Handler: handler.handler
       CodeUri: dist/
       Description: API REST Fastify para o app Rolê SC
@@ -41,31 +42,65 @@ Resources:
           JWT_EXPIRES_IN: !Ref JwtExpiresIn
       Events:
         ApiCatchAll:
-          Type: HttpApi
+          Type: Api
           Properties:
             Path: /{proxy+}
             Method: ANY
-            ApiId: !Ref HttpApi
+            RestApiId: !Ref RoleScRestApi
 
-  HttpApi:
-    Type: AWS::Serverless::HttpApi
+  RoleScRestApi:
+    Type: AWS::Serverless::Api
     Properties:
-      StageName: $default
-      CorsConfiguration:
-        AllowOrigins:
-          - '*'
-        AllowHeaders:
-          - Authorization
-          - Content-Type
-        AllowMethods:
-          - GET
-          - POST
-          - OPTIONS
+      Name: role-sc-api
+      StageName: prod
+      Cors:
+        AllowOrigin: "'*'"
+        AllowHeaders: "'Authorization, Content-Type, x-api-key'"
+        AllowMethods: "'GET, POST, OPTIONS'"
+      Auth:
+        ApiKeyRequired: true
+
+  RoleScApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn:
+      - RoleScRestApiprodStage
+    Properties:
+      Name: role-sc-api-key
+      Enabled: true
+      StageKeys:
+        - RestApiId: !Ref RoleScRestApi
+          StageName: prod
+
+  RoleScUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn:
+      - RoleScRestApiprodStage
+    Properties:
+      UsagePlanName: role-sc-usage-plan
+      Throttle:
+        RateLimit: 50
+        BurstLimit: 25
+      Quota:
+        Limit: 10000
+        Period: DAY
+      ApiStages:
+        - ApiId: !Ref RoleScRestApi
+          Stage: prod
+
+  RoleScUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref RoleScApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref RoleScUsagePlan
 
 Outputs:
   ApiUrl:
     Description: URL da API
-    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+    Value: !Sub 'https://${RoleScRestApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
   FunctionArn:
     Description: ARN da Lambda
-    Value: !GetAtt RoleScApi.Arn
+    Value: !GetAtt RoleScApiFunction.Arn
+  ApiKeyId:
+    Description: ID da API Key (use 'aws apigateway get-api-key --api-key <id> --include-value' para ver o valor)
+    Value: !Ref RoleScApiKey

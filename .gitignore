@@ -4,3 +4,4 @@ dist/
 *.zip
 .aws-sam/
 samconfig.toml
+.history

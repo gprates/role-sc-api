@@ -1,0 +1,172 @@
+{
+  "_type": "export",
+  "__export_format": 4,
+  "__export_date": "2026-04-14T00:00:00.000Z",
+  "__export_source": "insomnia.desktop.app:v2024.1.0",
+  "resources": [
+    {
+      "_id": "wrk_role_sc_api",
+      "_type": "workspace",
+      "name": "Rolê SC API",
+      "description": "API REST para eventos culturais e municipais de SC",
+      "scope": "collection",
+      "parentId": null
+    },
+    {
+      "_id": "env_base",
+      "_type": "environment",
+      "name": "Produção",
+      "parentId": "wrk_role_sc_api",
+      "data": {
+        "baseUrl": "https://805tspcek8.execute-api.sa-east-1.amazonaws.com/prod",
+        "apiKey": "tGQVLLGQFh2Z41AjyIlCn9Crr7boblsJ3rcg3dm1",
+        "token": ""
+      }
+    },
+    {
+      "_id": "env_local",
+      "_type": "environment",
+      "name": "Local",
+      "parentId": "wrk_role_sc_api",
+      "data": {
+        "baseUrl": "http://localhost:3000",
+        "apiKey": "",
+        "token": ""
+      }
+    },
+    {
+      "_id": "fld_auth",
+      "_type": "request_group",
+      "name": "Auth",
+      "parentId": "wrk_role_sc_api",
+      "metaSortKey": 1
+    },
+    {
+      "_id": "fld_eventos",
+      "_type": "request_group",
+      "name": "Eventos",
+      "parentId": "wrk_role_sc_api",
+      "metaSortKey": 2
+    },
+    {
+      "_id": "fld_metadata",
+      "_type": "request_group",
+      "name": "Metadata",
+      "parentId": "wrk_role_sc_api",
+      "metaSortKey": 3
+    },
+    {
+      "_id": "req_register",
+      "_type": "request",
+      "name": "Register",
+      "method": "POST",
+      "url": "{{ _.baseUrl }}/auth/register",
+      "parentId": "fld_auth",
+      "metaSortKey": 1,
+      "headers": [
+        { "name": "Content-Type", "value": "application/json" },
+        { "name": "x-api-key", "value": "{{ _.apiKey }}" }
+      ],
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"nome\": \"Gabriel Prates\",\n  \"email\": \"gabri_prates@hotmail.com\",\n  \"senha\": \"Kaire123\"\n}"
+      }
+    },
+    {
+      "_id": "req_login",
+      "_type": "request",
+      "name": "Login",
+      "method": "POST",
+      "url": "{{ _.baseUrl }}/auth/login",
+      "parentId": "fld_auth",
+      "metaSortKey": 2,
+      "headers": [
+        { "name": "Content-Type", "value": "application/json" },
+        { "name": "x-api-key", "value": "{{ _.apiKey }}" }
+      ],
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"email\": \"gabri_prates@hotmail.com\",\n  \"senha\": \"Kaire123\"\n}"
+      }
+    },
+    {
+      "_id": "req_me",
+      "_type": "request",
+      "name": "Me",
+      "method": "GET",
+      "url": "{{ _.baseUrl }}/auth/me",
+      "parentId": "fld_auth",
+      "metaSortKey": 3,
+      "headers": [
+        { "name": "x-api-key", "value": "{{ _.apiKey }}" },
+        { "name": "Authorization", "value": "Bearer {{ _.token }}" }
+      ],
+      "body": {}
+    },
+    {
+      "_id": "req_list_eventos",
+      "_type": "request",
+      "name": "Listar Eventos",
+      "method": "GET",
+      "url": "{{ _.baseUrl }}/eventos",
+      "parentId": "fld_eventos",
+      "metaSortKey": 1,
+      "headers": [
+        { "name": "x-api-key", "value": "{{ _.apiKey }}" },
+        { "name": "Authorization", "value": "Bearer {{ _.token }}" }
+      ],
+      "parameters": [
+        { "name": "page", "value": "1", "disabled": false },
+        { "name": "limit", "value": "20", "disabled": false },
+        { "name": "municipio", "value": "Itajaí", "disabled": true },
+        { "name": "categoria", "value": "Cultura", "disabled": true },
+        { "name": "dataInicio", "value": "2026-01-01", "disabled": true },
+        { "name": "dataFim", "value": "2026-12-31", "disabled": true },
+        { "name": "search", "value": "festival", "disabled": true }
+      ],
+      "body": {}
+    },
+    {
+      "_id": "req_get_evento",
+      "_type": "request",
+      "name": "Detalhe Evento",
+      "method": "GET",
+      "url": "{{ _.baseUrl }}/eventos/COLE_O_ID_AQUI",
+      "parentId": "fld_eventos",
+      "metaSortKey": 2,
+      "headers": [
+        { "name": "x-api-key", "value": "{{ _.apiKey }}" },
+        { "name": "Authorization", "value": "Bearer {{ _.token }}" }
+      ],
+      "body": {}
+    },
+    {
+      "_id": "req_municipios",
+      "_type": "request",
+      "name": "Listar Municípios",
+      "method": "GET",
+      "url": "{{ _.baseUrl }}/municipios",
+      "parentId": "fld_metadata",
+      "metaSortKey": 1,
+      "headers": [
+        { "name": "x-api-key", "value": "{{ _.apiKey }}" },
+        { "name": "Authorization", "value": "Bearer {{ _.token }}" }
+      ],
+      "body": {}
+    },
+    {
+      "_id": "req_categorias",
+      "_type": "request",
+      "name": "Listar Categorias",
+      "method": "GET",
+      "url": "{{ _.baseUrl }}/categorias",
+      "parentId": "fld_metadata",
+      "metaSortKey": 2,
+      "headers": [
+        { "name": "x-api-key", "value": "{{ _.apiKey }}" },
+        { "name": "Authorization", "value": "Bearer {{ _.token }}" }
+      ],
+      "body": {}
+    }
+  ]
+}
