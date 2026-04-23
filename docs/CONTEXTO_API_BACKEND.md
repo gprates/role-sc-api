@@ -40,10 +40,11 @@ Sites municipais → Lambda Crawler → MongoDB (raw_crawls)
 
 1. Expõe a coleção `eventos` via endpoints REST com filtros e paginação
 2. Gerencia autenticação de usuários (cadastro, login) com JWT
-3. Protege rotas com verificação de token JWT
-4. Fornece metadados auxiliares (lista de municípios e categorias)
+3. Envia emails de verificação via **AWS SES v2** e confirma a conta pela própria Lambda (HTML)
+4. Protege rotas com verificação de token JWT + `emailVerified`
+5. Fornece metadados auxiliares (lista de municípios e categorias)
 
-A API é **somente leitura** em relação a eventos — ela consulta a coleção `eventos` populada pelo NLP Processor. A única escrita que a API faz é na coleção `users` (cadastro de usuários).
+A API é **somente leitura** em relação a eventos — ela consulta a coleção `eventos` populada pelo NLP Processor. A escrita ocorre apenas em `users` (cadastro/verificação) e `emailVerificationTokens` (tokens temporários de verificação).
 
 ---
 
@@ -60,6 +61,7 @@ A API é **somente leitura** em relação a eventos — ela consulta a coleção
 | mongodb | ^7.1 | Cliente MongoDB |
 | bcryptjs | ^3.0 | Hash de senhas (puro JS, sem binários nativos) |
 | jsonwebtoken | ^9.0 | JWT |
+| @aws-sdk/client-sesv2 | ^3.1036 | Envio de email de verificação (AWS SES v2) |
 | dotenv | ^17.4 | Variáveis de ambiente (dev local) |
 | tsx | ^4.21 | Execução local TypeScript |
 | esbuild | ^0.28 | Bundler para Lambda |
@@ -98,6 +100,9 @@ A API é **somente leitura** em relação a eventos — ela consulta a coleção
 | `MONGODB_DB_NAME` | Nome do banco (`role_sc`) |
 | `JWT_SECRET` | Secret para assinar tokens JWT |
 | `JWT_EXPIRES_IN` | Tempo de expiração do token (padrão: `7d`) |
+| `SES_FROM_EMAIL` | Remetente verificado no SES (email pessoal do dev ou do domínio) |
+| `SES_AWS_REGION` | Região do SES (usar `us-east-1`; `sa-east-1` não tem SES) |
+| `APP_BASE_URL` | Base URL pública da API, usada para montar o link no email (sem barra final) |
 
 ### Segurança do API Gateway
 
@@ -107,7 +112,9 @@ A API é protegida por 3 camadas:
 |--------|---------------|-----------|----------|
 | **API Key** | Requests sem chave autorizada | API Gateway (Lambda não é invocada) | 403 Forbidden |
 | **Throttling + Quota** | Abuso e DDoS | API Gateway | 429 Too Many Requests |
-| **JWT** | Acesso não autenticado a dados | Lambda/Fastify | 401 Unauthorized |
+| **JWT + emailVerified** | Acesso não autenticado a dados ou conta não verificada | Lambda/Fastify | 401 / 403 (`EMAIL_NOT_VERIFIED`) |
+
+> **Exceção intencional:** `GET /auth/verify-email` é público (sem `x-api-key`), pois é aberto pelo browser a partir do link do email. Isso é configurado com um Event SAM dedicado (`ApiKeyRequired: false`). Todas as outras rotas continuam exigindo a chave.
 
 **Throttling:**
 - Rate limit: 50 requests/segundo
@@ -175,14 +182,34 @@ interface Evento {
 interface User {
   _id?: ObjectId;
   nome: string;
-  email: string;       // índice único
-  senha: string;       // hash bcrypt (nunca retornar em responses)
+  email: string;           // índice único
+  senha: string;           // hash bcrypt (nunca retornar em responses)
+  emailVerified: boolean;  // false no cadastro, true após clicar no link do email
   createdAt: Date;
 }
 ```
 
 **Índices (criados automaticamente pela API na inicialização):**
 - `{ email: 1 }` — único
+
+### Coleção `emailVerificationTokens` (escrita)
+
+```typescript
+interface EmailVerificationToken {
+  _id?: ObjectId;
+  userId: ObjectId;   // referência ao user
+  token: string;      // hex de 64 chars (crypto.randomBytes(32))
+  expiresAt: Date;    // now + 24h
+  createdAt: Date;
+}
+```
+
+**Índices (criados automaticamente pela API na inicialização):**
+- `{ expiresAt: 1 }` com `expireAfterSeconds: 0` — **TTL**, auto-deleta documentos expirados
+- `{ token: 1 }` — único, lookup rápido na rota de verificação
+- `{ userId: 1 }` — cleanup rápido ao reenviar verificação
+
+> **Observação sobre o TTL:** o monitor TTL do MongoDB roda a cada ~60s, então um token expirado pode ficar no banco por até 60s antes de ser deletado. A rota `GET /auth/verify-email` checa `expiresAt > now` explicitamente além de confiar no TTL.
 
 ### Categorias válidas
 
@@ -227,11 +254,13 @@ Cria uma nova conta de usuário.
 - `email`: string, formato email válido, obrigatório, único
 - `senha`: string, mínimo 6 caracteres, obrigatório
 
+Após o insert, a API gera um token hex de 32 bytes, salva em `emailVerificationTokens` com `expiresAt = now + 24h` e dispara um email via SES. O usuário **não recebe JWT** no cadastro — precisa verificar o email antes de poder logar.
+
 **Response 201:**
 ```json
 {
   "success": true,
-  "message": "Usuário criado com sucesso"
+  "message": "Conta criada. Verifique seu email para ativar sua conta."
 }
 ```
 
@@ -243,9 +272,22 @@ Cria uma nova conta de usuário.
 }
 ```
 
+> Se o email já está cadastrado porém não verificado, a resposta continua sendo 409. O usuário deve usar `POST /auth/resend-verification`.
+
+**Response 500 (falha no envio do email):**
+
+Se o SES falhar, a API **desfaz** a inserção do user e do token (compensação manual) antes de responder:
+
+```json
+{
+  "success": false,
+  "message": "Falha ao enviar email de verificação. Tente novamente em alguns minutos."
+}
+```
+
 #### `POST /auth/login`
 
-Autentica e retorna JWT.
+Autentica e retorna JWT. **Exige `emailVerified: true` no usuário.**
 
 **Request body:**
 ```json
@@ -264,6 +306,7 @@ Autentica e retorna JWT.
     "_id": "664a1b2c3d4e5f6a7b8c9d0e",
     "nome": "Gabriel Prates",
     "email": "gabriel@email.com",
+    "emailVerified": true,
     "createdAt": "2026-04-14T12:00:00.000Z"
   }
 }
@@ -276,6 +319,49 @@ Autentica e retorna JWT.
   "message": "Email ou senha inválidos"
 }
 ```
+
+**Response 403 (email não verificado):**
+```json
+{
+  "success": false,
+  "code": "EMAIL_NOT_VERIFIED",
+  "message": "Email ainda não verificado. Verifique sua caixa de entrada ou solicite um novo link."
+}
+```
+
+> O campo `code` é **obrigatório** nesse caso — o frontend usa pra detectar esse 403 específico e redirecionar pra tela de verificação.
+
+#### `POST /auth/resend-verification`
+
+Reenvia o email de verificação. **Público (sem JWT).** Rate-limited em 1 reenvio por email a cada 60s.
+
+**Request body:**
+```json
+{ "email": "gabriel@email.com" }
+```
+
+**Response 200 (sempre — mesmo se o email não existe, para evitar enumeration):**
+```json
+{
+  "success": true,
+  "message": "Se o email estiver cadastrado e pendente de verificação, você receberá um novo link em alguns minutos."
+}
+```
+
+**Comportamento interno:**
+- Email não cadastrado → retorna 200 sem enviar nada
+- Email já verificado → retorna 200 sem enviar nada
+- Token mais recente tem `< 60s` → retorna 200 sem reenviar (rate limit)
+- Caso contrário: deleta tokens antigos, gera novo token (32 bytes hex, `expiresAt = now + 24h`), envia SES
+
+#### `GET /auth/verify-email?token=XXX`
+
+Endpoint **público** (sem `x-api-key`, sem JWT). Aberto pelo browser a partir do link do email. Resposta **sempre** `text/html; charset=utf-8`.
+
+- **200** (sucesso): página HTML de confirmação. Marca `users.emailVerified = true` e deleta o token da coleção.
+- **400** (token ausente/inválido/expirado): página HTML de erro com instrução pra solicitar novo link.
+
+Além do TTL do Mongo, a rota valida `expiresAt > now` explicitamente.
 
 ---
 
@@ -306,6 +392,7 @@ Retorna os dados do usuário logado.
     "_id": "664a1b2c3d4e5f6a7b8c9d0e",
     "nome": "Gabriel Prates",
     "email": "gabriel@email.com",
+    "emailVerified": true,
     "createdAt": "2026-04-14T12:00:00.000Z"
   }
 }
@@ -421,7 +508,7 @@ Retorna a lista fixa de categorias válidas.
 
 ---
 
-## 7. FLUXO DE AUTENTICAÇÃO (JWT)
+## 7. FLUXO DE AUTENTICAÇÃO (JWT + verificação de email)
 
 ### Fluxo completo
 
@@ -430,16 +517,31 @@ Retorna a lista fixa de categorias válidas.
    → Valida dados (JSON Schema do Fastify)
    → Verifica email duplicado
    → Hash bcryptjs da senha (salt rounds: 10)
-   → Salva no MongoDB (coleção users)
-   → Retorna 201
+   → Insere user com emailVerified: false
+   → Gera token hex (crypto.randomBytes(32)) e salva em emailVerificationTokens
+     com expiresAt = now + 24h
+   → Envia email via AWS SES (SendEmail v2) com link {APP_BASE_URL}/auth/verify-email?token=...
+   → Se o SES falhar: compensa (deleta token + user) e retorna 500
+   → Sucesso: retorna 201 SEM JWT
 
-2. POST /auth/login
+2. GET /auth/verify-email?token=XXX  (aberto no browser, público)
+   → Busca token em emailVerificationTokens
+   → Não encontrado OU expiresAt <= now → HTML de erro
+   → Encontrado → marca users.emailVerified = true, deleta token, HTML de sucesso
+
+3. POST /auth/resend-verification   (público, sem JWT, rate-limited 60s)
+   → Sempre retorna 200 com mensagem genérica (anti-enumeration)
+   → Se o user existe E !emailVerified E último token tem >= 60s:
+       deleta tokens antigos, gera novo, envia email
+
+4. POST /auth/login
    → Busca user por email
    → Compara senha com bcrypt.compare()
+   → Se user.emailVerified !== true → 403 { code: 'EMAIL_NOT_VERIFIED' }
    → Gera JWT com payload { userId, email }
-   → Retorna 200 com token + dados do user (sem senha)
+   → Retorna 200 com token + dados do user (sem senha, com emailVerified)
 
-3. Requisição protegida
+5. Requisição protegida
    → App envia headers: x-api-key + Authorization: Bearer <token>
    → API Gateway valida a API Key (403 se inválida)
    → auth.hook.ts extrai o token do header Authorization
@@ -462,31 +564,39 @@ Retorna a lista fixa de categorias válidas.
 ```
 src/
 ├── handler.ts                  ← entry point da Lambda
-├── app.ts                      ← setup Fastify, plugins, registro de rotas, error handler
+├── app.ts                      ← setup Fastify, plugins, registro de rotas, error handler (propaga `code` UPPER_SNAKE_CASE)
 ├── invoke-local.ts             ← servidor local para desenvolvimento (pnpm dev)
 ├── routes/
-│   ├── auth.routes.ts          ← POST /auth/register, POST /auth/login, GET /auth/me
+│   ├── auth.routes.ts          ← POST /auth/register, POST /auth/login, GET /auth/me,
+│   │                             GET /auth/verify-email (HTML), POST /auth/resend-verification
 │   ├── evento.routes.ts        ← GET /eventos, GET /eventos/:id
 │   └── metadata.routes.ts      ← GET /municipios, GET /categorias
 ├── services/
-│   ├── auth.service.ts         ← lógica de registro, login, geração JWT
+│   ├── auth.service.ts         ← register, login, verifyEmail, resendVerification, getMe
+│   ├── email.service.ts        ← sendVerificationEmail (AWS SES v2)
 │   └── evento.service.ts       ← queries com filtros, paginação, busca
 ├── hooks/
 │   └── auth.hook.ts            ← preHandler do Fastify que verifica JWT
 ├── database/
 │   ├── mongodb.connection.ts   ← conexão singleton (reutilizada entre invocações Lambda)
 │   └── repositories/
-│       ├── user.repository.ts  ← findByEmail, findById, insertUser
+│       ├── user.repository.ts  ← findByEmail, findById, insertUser, deleteById, markEmailVerified
+│       ├── emailVerification.repository.ts ← create, findByToken, deleteByUserId,
+│       │                                       deleteByToken, findLatestByUserId (+ TTL index)
 │       └── evento.repository.ts ← findEventos, findEventoById, getDistinctMunicipios
 ├── types/
-│   ├── user.types.ts           ← User, UserInsert, UserPublic
+│   ├── user.types.ts           ← User, UserInsert, UserPublic (inclui emailVerified)
+│   ├── emailVerification.types.ts ← EmailVerificationToken, EmailVerificationTokenInsert
 │   ├── evento.types.ts         ← Evento, Categoria, CATEGORIAS_VALIDAS
-│   └── auth.types.ts           ← LoginBody, RegisterBody, JwtPayload
+│   └── auth.types.ts           ← LoginBody, RegisterBody, ResendVerificationBody,
+│                                  VerifyEmailQuery, JwtPayload, VerifyEmailResult
 ├── schemas/
-│   ├── auth.schemas.ts         ← JSON Schema para validação do Fastify (register, login)
+│   ├── auth.schemas.ts         ← JSON Schema: register, login, resendVerification
+│   │                             (verify-email NÃO usa schema — handler retorna HTML)
 │   └── evento.schemas.ts       ← JSON Schema para query params de listagem
 └── utils/
     ├── jwt.utils.ts            ← signToken, verifyToken, extractTokenFromHeader
+    ├── emailVerifyPages.ts     ← renderSuccessPage, renderErrorPage, escapeHtml
     └── logger.utils.ts         ← createLogger (mesmo padrão do NLP)
 ```
 
@@ -504,9 +614,17 @@ src/
 |--------|--------|
 | 400 | Validação do JSON Schema falha (automático do Fastify) |
 | 401 | Token JWT inválido/ausente ou credenciais erradas |
+| 403 | Email ainda não verificado (payload inclui `code: 'EMAIL_NOT_VERIFIED'`) |
 | 404 | Evento ou usuário não encontrado |
 | 409 | Email já cadastrado |
 | 500 | Erro interno (mensagem genérica, sem expor detalhes) |
+
+**Convenção do campo `code`:** O error handler propaga `error.code` no payload JSON quando:
+- `statusCode < 500`
+- `code` casa com `^[A-Z][A-Z0-9_]*$` (UPPER_SNAKE_CASE do nosso domínio)
+- `code` não começa com `FST_` (Fastify) nem `ERR_` (Node)
+
+Códigos ativos: `EMAIL_NOT_VERIFIED`.
 
 ---
 
@@ -544,7 +662,14 @@ sam deploy --guided
 aws apigateway get-api-key --api-key <ApiKeyId> --include-value
 ```
 
-Os parâmetros do deploy (`MongoDbUri`, `MongoDbName`, `JwtSecret`, `JwtExpiresIn`) são salvos automaticamente em `samconfig.toml` após o primeiro `--guided`. Deploys subsequentes: `sam build && sam deploy`.
+Os parâmetros do deploy (`MongoDbUri`, `MongoDbName`, `JwtSecret`, `JwtExpiresIn`, `SesFromEmail`, `SesAwsRegion`, `AppBaseUrl`) são salvos automaticamente em `samconfig.toml` após o primeiro `--guided`. Deploys subsequentes: `sam build && sam deploy`.
+
+**Pré-requisitos do SES antes do primeiro deploy:**
+
+1. No console do SES (região `us-east-1`), verificar o email do dev em **Verified identities** (modo sandbox).
+2. Verificar também cada email destinatário de teste (sandbox só envia para identidades verificadas).
+3. A Lambda já tem permissão IAM para `ses:SendEmail` / `ses:SendRawEmail` via `Policies` no `template.yaml`.
+4. Após o primeiro deploy, pegar a `ApiUrl` do output e colocar em `AppBaseUrl` (re-deploy).
 
 ---
 
@@ -552,10 +677,13 @@ Os parâmetros do deploy (`MongoDbUri`, `MongoDbName`, `JwtSecret`, `JwtExpiresI
 
 - Validação via JSON Schema do Fastify (retorna 400 automaticamente com detalhes)
 - Erros de autenticação: 401
+- Email não verificado no login: 403 com `code: 'EMAIL_NOT_VERIFIED'`
 - Recurso não encontrado: 404
 - Email duplicado: 409
 - Erros internos: 500 com mensagem genérica (sem expor detalhes)
-- Erros de negócio usam `throw` com `statusCode` no objeto Error, capturados pelo error handler centralizado
+- Falha no SES durante `/auth/register`: 500 após compensação (rollback do user e do token)
+- `GET /auth/verify-email` **nunca** retorna JSON — erros viram HTML (status 400 ou 200 conforme o caso)
+- Erros de negócio usam `throw` com `statusCode` (e opcionalmente `code`) no objeto Error, capturados pelo error handler centralizado
 
 ---
 

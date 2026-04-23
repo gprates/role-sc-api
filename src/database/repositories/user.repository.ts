@@ -1,4 +1,4 @@
-import type { Collection } from 'mongodb';
+import { ObjectId, type Collection } from 'mongodb';
 import { getDb } from '../mongodb.connection.js';
 import type { User, UserInsert } from '../../types/user.types.js';
 import { createLogger } from '../../utils/logger.utils.js';
@@ -25,13 +25,23 @@ export async function findByEmail(email: string): Promise<User | null> {
 }
 
 export async function findById(id: string): Promise<User | null> {
-  const { ObjectId } = await import('mongodb');
   const col = await getCollection();
   return col.findOne({ _id: new ObjectId(id) });
 }
 
-export async function insertUser(user: UserInsert): Promise<string> {
+export async function insertUser(user: UserInsert): Promise<ObjectId> {
   const col = await getCollection();
   const result = await col.insertOne(user as User);
-  return result.insertedId.toString();
+  return result.insertedId;
+}
+
+export async function deleteById(id: ObjectId): Promise<boolean> {
+  const col = await getCollection();
+  const result = await col.deleteOne({ _id: id });
+  return result.deletedCount === 1;
+}
+
+export async function markEmailVerified(id: ObjectId): Promise<void> {
+  const col = await getCollection();
+  await col.updateOne({ _id: id }, { $set: { emailVerified: true } });
 }

@@ -1,0 +1,392 @@
+{
+  "_type": "export",
+  "__export_format": 4,
+  "__export_date": "2026-04-23T20:00:00.000Z",
+  "__export_source": "role-sc-api",
+  "resources": [
+    {
+      "_id": "wrk_rolesc_api",
+      "parentId": null,
+      "modified": 1745712000000,
+      "created": 1745712000000,
+      "name": "Rolê SC — API",
+      "description": "Collection das rotas da role-sc-api. Use o env 'Local' para desenvolvimento e 'Prod' para a API no AWS. JWT é chainado automaticamente a partir da resposta do login.",
+      "scope": "collection",
+      "_type": "workspace"
+    },
+    {
+      "_id": "env_base",
+      "parentId": "wrk_rolesc_api",
+      "modified": 1745712000000,
+      "created": 1745712000000,
+      "name": "Base Environment",
+      "data": {
+        "test_nome": "Gabriel Prates",
+        "test_email": "gabri_prates@hotmail.com",
+        "test_password": "Kaire123"
+      },
+      "dataPropertyOrder": {
+        "&": ["test_nome", "test_email", "test_password"]
+      },
+      "color": null,
+      "isPrivate": false,
+      "metaSortKey": 1745712000000,
+      "_type": "environment"
+    },
+    {
+      "_id": "env_local",
+      "parentId": "env_base",
+      "modified": 1745712000000,
+      "created": 1745712000000,
+      "name": "Local",
+      "data": {
+        "base_url": "http://localhost:3000",
+        "api_key": ""
+      },
+      "dataPropertyOrder": {
+        "&": ["base_url", "api_key"]
+      },
+      "color": "#10b981",
+      "isPrivate": false,
+      "metaSortKey": 1745712000001,
+      "_type": "environment"
+    },
+    {
+      "_id": "env_prod",
+      "parentId": "env_base",
+      "modified": 1745712000000,
+      "created": 1745712000000,
+      "name": "Prod",
+      "data": {
+        "base_url": "https://SEU-API-ID.execute-api.sa-east-1.amazonaws.com/prod",
+        "api_key": "COLE-SUA-API-KEY-AQUI"
+      },
+      "dataPropertyOrder": {
+        "&": ["base_url", "api_key"]
+      },
+      "color": "#ef4444",
+      "isPrivate": false,
+      "metaSortKey": 1745712000002,
+      "_type": "environment"
+    },
+    {
+      "_id": "fld_auth",
+      "parentId": "wrk_rolesc_api",
+      "modified": 1745712000000,
+      "created": 1745712000000,
+      "name": "Auth",
+      "description": "Cadastro, login, verificação de email e reenvio.",
+      "environment": {},
+      "environmentPropertyOrder": null,
+      "metaSortKey": -1745712000000,
+      "_type": "request_group"
+    },
+    {
+      "_id": "req_register",
+      "parentId": "fld_auth",
+      "modified": 1745712000000,
+      "created": 1745712000000,
+      "url": "{{ _.base_url }}/auth/register",
+      "name": "POST /auth/register",
+      "description": "Cria usuário com emailVerified=false, gera token hex de 32 bytes e dispara email via SES.\n\nResposta esperada (201):\n{\n  \"success\": true,\n  \"message\": \"Conta criada. Verifique seu email para ativar sua conta.\"\n}\n\nNão retorna JWT. O usuário precisa verificar o email antes de logar.",
+      "method": "POST",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"nome\": \"{{ _.test_nome }}\",\n  \"email\": \"{{ _.test_email }}\",\n  \"senha\": \"{{ _.test_password }}\"\n}"
+      },
+      "parameters": [],
+      "headers": [
+        { "name": "Content-Type", "value": "application/json" },
+        { "name": "x-api-key", "value": "{{ _.api_key }}" }
+      ],
+      "authentication": {},
+      "metaSortKey": -1745712000100,
+      "isPrivate": false,
+      "pathParameters": [],
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "_type": "request"
+    },
+    {
+      "_id": "req_login",
+      "parentId": "fld_auth",
+      "modified": 1745712000000,
+      "created": 1745712000000,
+      "url": "{{ _.base_url }}/auth/login",
+      "name": "POST /auth/login",
+      "description": "Autentica e retorna JWT + user. Exige emailVerified=true.\n\nRespostas:\n- 200: { success, token, user } ← outras requisições puxam o token daqui automaticamente\n- 401: credenciais inválidas\n- 403: { success: false, code: 'EMAIL_NOT_VERIFIED', message } ← email não verificado",
+      "method": "POST",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"email\": \"{{ _.test_email }}\",\n  \"senha\": \"{{ _.test_password }}\"\n}"
+      },
+      "parameters": [],
+      "headers": [
+        { "name": "Content-Type", "value": "application/json" },
+        { "name": "x-api-key", "value": "{{ _.api_key }}" }
+      ],
+      "authentication": {},
+      "metaSortKey": -1745712000200,
+      "isPrivate": false,
+      "pathParameters": [],
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "_type": "request"
+    },
+    {
+      "_id": "req_me",
+      "parentId": "fld_auth",
+      "modified": 1745712000000,
+      "created": 1745712000000,
+      "url": "{{ _.base_url }}/auth/me",
+      "name": "GET /auth/me",
+      "description": "Retorna o user logado (inclui emailVerified).\n\nJWT é puxado automaticamente da resposta do POST /auth/login.\nSe der erro, rode o login primeiro.",
+      "method": "GET",
+      "body": {},
+      "parameters": [],
+      "headers": [
+        {
+          "name": "Authorization",
+          "value": "Bearer {% response 'body', 'req_login', 'b64::JC50b2tlbg==::46b', 'no-history', 60 %}"
+        },
+        { "name": "x-api-key", "value": "{{ _.api_key }}" }
+      ],
+      "authentication": {},
+      "metaSortKey": -1745712000300,
+      "isPrivate": false,
+      "pathParameters": [],
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "_type": "request"
+    },
+    {
+      "_id": "req_resend",
+      "parentId": "fld_auth",
+      "modified": 1745712000000,
+      "created": 1745712000000,
+      "url": "{{ _.base_url }}/auth/resend-verification",
+      "name": "POST /auth/resend-verification",
+      "description": "Reenvia o email de verificação (rate-limited em 60s por email).\n\nResposta sempre 200 com mensagem genérica — a API não vaza se o email está cadastrado ou não (anti-enumeration).",
+      "method": "POST",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"email\": \"{{ _.test_email }}\"\n}"
+      },
+      "parameters": [],
+      "headers": [
+        { "name": "Content-Type", "value": "application/json" },
+        { "name": "x-api-key", "value": "{{ _.api_key }}" }
+      ],
+      "authentication": {},
+      "metaSortKey": -1745712000400,
+      "isPrivate": false,
+      "pathParameters": [],
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "_type": "request"
+    },
+    {
+      "_id": "req_verify_email",
+      "parentId": "fld_auth",
+      "modified": 1745712000000,
+      "created": 1745712000000,
+      "url": "{{ _.base_url }}/auth/verify-email",
+      "name": "GET /auth/verify-email (referência)",
+      "description": "Rota chamada pelo BROWSER a partir do link do email — não pelo app.\n\nResposta é SEMPRE text/html, nunca JSON.\n\nEm prod, essa é a única rota sem x-api-key (Event SAM dedicado com ApiKeyRequired: false).\n\nPara testar manualmente:\n1. Rode o register\n2. Abra o email que chegou\n3. Copie o token da query string do link\n4. Cole no parâmetro 'token' abaixo\n5. Send (a resposta será HTML)",
+      "method": "GET",
+      "body": {},
+      "parameters": [
+        {
+          "name": "token",
+          "value": "COLE-O-TOKEN-DO-EMAIL-AQUI",
+          "disabled": false
+        }
+      ],
+      "headers": [],
+      "authentication": {},
+      "metaSortKey": -1745712000500,
+      "isPrivate": false,
+      "pathParameters": [],
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "_type": "request"
+    },
+    {
+      "_id": "fld_eventos",
+      "parentId": "wrk_rolesc_api",
+      "modified": 1745712000000,
+      "created": 1745712000000,
+      "name": "Eventos",
+      "description": "Listagem e detalhe de eventos. Todas protegidas por JWT.",
+      "environment": {},
+      "environmentPropertyOrder": null,
+      "metaSortKey": -1745711999000,
+      "_type": "request_group"
+    },
+    {
+      "_id": "req_list_eventos",
+      "parentId": "fld_eventos",
+      "modified": 1745712000000,
+      "created": 1745712000000,
+      "url": "{{ _.base_url }}/eventos",
+      "name": "GET /eventos",
+      "description": "Lista eventos com filtros e paginação. Apenas isEvent=true.\n\nTodos os query params abaixo estão desabilitados por padrão — habilite os que precisar.",
+      "method": "GET",
+      "body": {},
+      "parameters": [
+        { "name": "municipio", "value": "Itajaí", "disabled": true },
+        { "name": "categoria", "value": "Cultura", "disabled": true },
+        { "name": "dataInicio", "value": "2026-04-01", "disabled": true },
+        { "name": "dataFim", "value": "2026-04-30", "disabled": true },
+        { "name": "search", "value": "festival", "disabled": true },
+        { "name": "page", "value": "1", "disabled": true },
+        { "name": "limit", "value": "20", "disabled": true }
+      ],
+      "headers": [
+        {
+          "name": "Authorization",
+          "value": "Bearer {% response 'body', 'req_login', 'b64::JC50b2tlbg==::46b', 'no-history', 60 %}"
+        },
+        { "name": "x-api-key", "value": "{{ _.api_key }}" }
+      ],
+      "authentication": {},
+      "metaSortKey": -1745712001000,
+      "isPrivate": false,
+      "pathParameters": [],
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "_type": "request"
+    },
+    {
+      "_id": "req_get_evento",
+      "parentId": "fld_eventos",
+      "modified": 1745712000000,
+      "created": 1745712000000,
+      "url": "{{ _.base_url }}/eventos/:id",
+      "name": "GET /eventos/:id",
+      "description": "Detalhe de um evento. Troque o path param 'id' por um ObjectId válido (pega um id da resposta do GET /eventos).",
+      "method": "GET",
+      "body": {},
+      "parameters": [],
+      "headers": [
+        {
+          "name": "Authorization",
+          "value": "Bearer {% response 'body', 'req_login', 'b64::JC50b2tlbg==::46b', 'no-history', 60 %}"
+        },
+        { "name": "x-api-key", "value": "{{ _.api_key }}" }
+      ],
+      "authentication": {},
+      "metaSortKey": -1745712001100,
+      "isPrivate": false,
+      "pathParameters": [
+        {
+          "name": "id",
+          "value": "COLE-UM-OBJECT-ID-AQUI"
+        }
+      ],
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "_type": "request"
+    },
+    {
+      "_id": "fld_metadata",
+      "parentId": "wrk_rolesc_api",
+      "modified": 1745712000000,
+      "created": 1745712000000,
+      "name": "Metadata",
+      "description": "Metadados auxiliares: lista de municípios e categorias válidas.",
+      "environment": {},
+      "environmentPropertyOrder": null,
+      "metaSortKey": -1745711998000,
+      "_type": "request_group"
+    },
+    {
+      "_id": "req_municipios",
+      "parentId": "fld_metadata",
+      "modified": 1745712000000,
+      "created": 1745712000000,
+      "url": "{{ _.base_url }}/municipios",
+      "name": "GET /municipios",
+      "description": "Lista de municípios que têm eventos cadastrados (distinct). Exige JWT.",
+      "method": "GET",
+      "body": {},
+      "parameters": [],
+      "headers": [
+        {
+          "name": "Authorization",
+          "value": "Bearer {% response 'body', 'req_login', 'b64::JC50b2tlbg==::46b', 'no-history', 60 %}"
+        },
+        { "name": "x-api-key", "value": "{{ _.api_key }}" }
+      ],
+      "authentication": {},
+      "metaSortKey": -1745712002000,
+      "isPrivate": false,
+      "pathParameters": [],
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "_type": "request"
+    },
+    {
+      "_id": "req_categorias",
+      "parentId": "fld_metadata",
+      "modified": 1745712000000,
+      "created": 1745712000000,
+      "url": "{{ _.base_url }}/categorias",
+      "name": "GET /categorias",
+      "description": "Lista fixa das categorias válidas. Exige JWT.",
+      "method": "GET",
+      "body": {},
+      "parameters": [],
+      "headers": [
+        {
+          "name": "Authorization",
+          "value": "Bearer {% response 'body', 'req_login', 'b64::JC50b2tlbg==::46b', 'no-history', 60 %}"
+        },
+        { "name": "x-api-key", "value": "{{ _.api_key }}" }
+      ],
+      "authentication": {},
+      "metaSortKey": -1745712002100,
+      "isPrivate": false,
+      "pathParameters": [],
+      "settingStoreCookies": true,
+      "settingSendCookies": true,
+      "settingDisableRenderRequestBody": false,
+      "settingEncodeUrl": true,
+      "settingRebuildPath": true,
+      "settingFollowRedirects": "global",
+      "_type": "request"
+    }
+  ]
+}

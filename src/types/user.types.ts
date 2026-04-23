@@ -5,6 +5,7 @@ export interface User {
   nome: string;
   email: string;
   senha: string;
+  emailVerified: boolean;
   createdAt: Date;
 }
 
@@ -14,5 +15,6 @@ export interface UserPublic {
   _id: string;
   nome: string;
   email: string;
+  emailVerified: boolean;
   createdAt: Date;
 }

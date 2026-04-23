@@ -19,6 +19,16 @@ Parameters:
     Type: String
     Description: Tempo de expiração do token JWT
     Default: 7d
+  SesFromEmail:
+    Type: String
+    Description: Remetente verificado no SES (email pessoal ou do domínio)
+  SesAwsRegion:
+    Type: String
+    Description: Região do SES (us-east-1 recomendado — sa-east-1 não tem SES)
+    Default: us-east-1
+  AppBaseUrl:
+    Type: String
+    Description: Base URL pública da API, usada para montar o link no email (sem barra final)
 
 Globals:
   Function:
@@ -40,7 +50,29 @@ Resources:
           MONGODB_DB_NAME: !Ref MongoDbName
           JWT_SECRET: !Ref JwtSecret
           JWT_EXPIRES_IN: !Ref JwtExpiresIn
+          SES_FROM_EMAIL: !Ref SesFromEmail
+          SES_AWS_REGION: !Ref SesAwsRegion
+          APP_BASE_URL: !Ref AppBaseUrl
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: '*'
       Events:
+        # Rota pública: clicada pelo browser a partir do link do email.
+        # NÃO exige x-api-key porque o usuário não tem como informar a chave.
+        VerifyEmail:
+          Type: Api
+          Properties:
+            Path: /auth/verify-email
+            Method: GET
+            RestApiId: !Ref RoleScRestApi
+            Auth:
+              ApiKeyRequired: false
+        # Catch-all protegido por API Key — cobre todo o resto da API.
         ApiCatchAll:
           Type: Api
           Properties:

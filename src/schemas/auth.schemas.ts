@@ -22,3 +22,18 @@ export const loginSchema = {
     additionalProperties: false,
   },
 } as const;
+
+export const resendVerificationSchema = {
+  body: {
+    type: 'object',
+    required: ['email'],
+    properties: {
+      email: { type: 'string', format: 'email' },
+    },
+    additionalProperties: false,
+  },
+} as const;
+
+// Nota: /auth/verify-email NÃO usa JSON Schema porque a resposta é sempre
+// text/html. Qualquer validação do Fastify retornaria 400 JSON — o handler
+// valida manualmente e devolve HTML de erro.
