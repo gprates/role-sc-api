@@ -39,10 +39,22 @@ Globals:
 Resources:
   RoleScApiFunction:
     Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Format: cjs
+        Minify: true
+        Target: node24
+        Sourcemap: false
+        EntryPoints:
+          - handler.ts
+        # External vazio: bundla TUDO (incluindo @aws-sdk/client-sesv2,
+        # que não vem pré-instalado no runtime nodejs24.x).
+        External: []
     Properties:
       FunctionName: ROLE_SC_API
       Handler: handler.handler
-      CodeUri: dist/
+      CodeUri: src/
       Description: API REST Fastify para o app Rolê SC
       Environment:
         Variables:
