@@ -3,6 +3,9 @@ import {
   registerSchema,
   loginSchema,
   resendVerificationSchema,
+  forgotPasswordSchema,
+  verifyResetCodeSchema,
+  resetPasswordSchema,
 } from '../schemas/auth.schemas.js';
 import * as authService from '../services/auth.service.js';
 import { authHook } from '../hooks/auth.hook.js';
@@ -15,6 +18,9 @@ import type {
   LoginBody,
   ResendVerificationBody,
   VerifyEmailQuery,
+  ForgotPasswordBody,
+  VerifyResetCodeBody,
+  ResetPasswordBody,
 } from '../types/auth.types.js';
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
@@ -65,6 +71,34 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     { schema: resendVerificationSchema },
     async (request) => {
       return authService.resendVerification(request.body.email);
+    },
+  );
+
+  app.post<{ Body: ForgotPasswordBody }>(
+    '/forgot-password',
+    { schema: forgotPasswordSchema },
+    async (request) => {
+      return authService.forgotPassword(request.body.email);
+    },
+  );
+
+  app.post<{ Body: VerifyResetCodeBody }>(
+    '/verify-reset-code',
+    { schema: verifyResetCodeSchema },
+    async (request) => {
+      return authService.verifyResetCode(request.body.email, request.body.code);
+    },
+  );
+
+  app.post<{ Body: ResetPasswordBody }>(
+    '/reset-password',
+    { schema: resetPasswordSchema },
+    async (request) => {
+      return authService.resetPassword(
+        request.body.email,
+        request.body.resetToken,
+        request.body.novaSenha,
+      );
     },
   );
 }

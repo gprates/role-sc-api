@@ -1,11 +1,14 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomInt } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { ObjectId } from 'mongodb';
 import * as userRepo from '../database/repositories/user.repository.js';
 import * as verificationRepo from '../database/repositories/emailVerification.repository.js';
+import * as resetCodeRepo from '../database/repositories/passwordResetCode.repository.js';
+import * as resetTokenRepo from '../database/repositories/passwordResetToken.repository.js';
 import * as emailService from './email.service.js';
 import { signToken } from '../utils/jwt.utils.js';
 import { createLogger } from '../utils/logger.utils.js';
+import { isStrongPassword } from '../utils/passwordValidator.js';
 import type {
   RegisterBody,
   LoginBody,
@@ -18,6 +21,9 @@ const logger = createLogger('AuthService');
 const SALT_ROUNDS = 10;
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const RESEND_COOLDOWN_MS = 60 * 1000; // 60s
+const RESET_CODE_TTL_MS = 15 * 60 * 1000; // 15min
+const RESET_TOKEN_TTL_MS = 15 * 60 * 1000; // 15min
+const RESET_CODE_RESEND_COOLDOWN_MS = 60 * 1000; // 60s
 
 function toPublicUser(user: User): UserPublic {
   return {
@@ -225,4 +231,195 @@ export async function resendVerification(
   }
 
   return genericResponse;
+}
+
+// ============================================================================
+// Recuperação de senha
+// ============================================================================
+//
+// Princípios (ver CONTRATO_RECUPERACAO_SENHA.md §10):
+// - Antienumeration em forgot-password e reset-password (sem vazar se email
+//   existe). verify-reset-code é a exceção: precisa retornar erro específico
+//   pra UX viável.
+// - Códigos e tokens NUNCA são logados.
+// - Cleanup agressivo: ao validar/usar, deleta todos os pendentes do user.
+// - Email de notificação no reset não bloqueia: se SES falhar, ainda OK.
+
+function generateNumericCode(): string {
+  // 100000..999999 → sempre 6 dígitos. randomInt é criptograficamente seguro
+  // (ao contrário de Math.random).
+  return randomInt(100000, 1000000).toString();
+}
+
+export async function forgotPassword(
+  email: string,
+): Promise<{ success: true; message: string }> {
+  const genericResponse = {
+    success: true as const,
+    message:
+      'Se o email estiver cadastrado, você receberá um código em alguns minutos.',
+  };
+
+  const user = await userRepo.findByEmail(email);
+  // Antienumeration: tratamos email inexistente e email não verificado
+  // exatamente como o caminho feliz. Não vazamos qual dos dois.
+  if (!user || user.emailVerified !== true) {
+    return genericResponse;
+  }
+
+  const userId = user._id!;
+
+  const latest = await resetCodeRepo.findLatestByUserId(userId);
+  if (
+    latest &&
+    Date.now() - latest.createdAt.getTime() < RESET_CODE_RESEND_COOLDOWN_MS
+  ) {
+    logger.info(
+      `Rate limit atingido em forgot-password para userId=${userId.toString()}`,
+    );
+    return genericResponse;
+  }
+
+  await resetCodeRepo.deleteByUserId(userId);
+
+  const code = generateNumericCode();
+  const now = new Date();
+
+  try {
+    await resetCodeRepo.create({
+      userId,
+      code,
+      expiresAt: new Date(now.getTime() + RESET_CODE_TTL_MS),
+      createdAt: now,
+    });
+  } catch (err) {
+    // Sem expor detalhes pro caller — antienumeration mantém a resposta.
+    logger.error('Falha ao gerar código em forgot-password:', err);
+    return genericResponse;
+  }
+
+  try {
+    await emailService.sendResetCodeEmail(user.email, user.nome, code);
+  } catch (err) {
+    logger.error('Falha no SES em forgot-password:', err);
+    // Cleanup: se o email não saiu, o código não tem utilidade.
+    await resetCodeRepo.deleteByUserId(userId).catch(() => undefined);
+  }
+
+  return genericResponse;
+}
+
+function makeInvalidResetCodeError(): Error & { statusCode: number; code: string } {
+  const error = new Error('Código inválido ou expirado.') as Error & {
+    statusCode: number;
+    code: string;
+  };
+  error.statusCode = 400;
+  error.code = 'INVALID_RESET_CODE';
+  return error;
+}
+
+function makeInvalidResetTokenError(): Error & { statusCode: number; code: string } {
+  const error = new Error(
+    'O processo de recuperação expirou. Solicite um novo código.',
+  ) as Error & { statusCode: number; code: string };
+  error.statusCode = 400;
+  error.code = 'INVALID_RESET_TOKEN';
+  return error;
+}
+
+function makeWeakPasswordError(): Error & { statusCode: number; code: string } {
+  const error = new Error(
+    'A senha não cumpre todos os requisitos de segurança.',
+  ) as Error & { statusCode: number; code: string };
+  error.statusCode = 400;
+  error.code = 'WEAK_PASSWORD';
+  return error;
+}
+
+export async function verifyResetCode(
+  email: string,
+  code: string,
+): Promise<{ success: true; resetToken: string }> {
+  const user = await userRepo.findByEmail(email);
+  // Mesmo erro genérico de "código errado" pra não vazar se o email existe.
+  if (!user) {
+    throw makeInvalidResetCodeError();
+  }
+
+  const userId = user._id!;
+
+  const doc = await resetCodeRepo.findByUserAndCode(userId, code);
+  if (!doc) {
+    throw makeInvalidResetCodeError();
+  }
+
+  // TTL do Mongo roda a cada ~60s, então checamos expiresAt explicitamente.
+  if (doc.expiresAt.getTime() <= Date.now()) {
+    await resetCodeRepo.deleteByUserId(userId).catch(() => undefined);
+    throw makeInvalidResetCodeError();
+  }
+
+  // Single-use: deleta o código (e quaisquer outros pendentes do user).
+  await resetCodeRepo.deleteByUserId(userId);
+  // Cleanup de tokens antigos antes de emitir um novo.
+  await resetTokenRepo.deleteByUserId(userId);
+
+  const resetToken = randomBytes(32).toString('hex');
+  const now = new Date();
+  await resetTokenRepo.create({
+    userId,
+    token: resetToken,
+    expiresAt: new Date(now.getTime() + RESET_TOKEN_TTL_MS),
+    createdAt: now,
+  });
+
+  return { success: true, resetToken };
+}
+
+export async function resetPassword(
+  email: string,
+  resetToken: string,
+  novaSenha: string,
+): Promise<{ success: true; message: string }> {
+  const user = await userRepo.findByEmail(email);
+  if (!user) {
+    throw makeInvalidResetTokenError();
+  }
+
+  const userId = user._id!;
+
+  const doc = await resetTokenRepo.findByToken(resetToken);
+  if (!doc || !doc.userId.equals(userId)) {
+    throw makeInvalidResetTokenError();
+  }
+
+  if (doc.expiresAt.getTime() <= Date.now()) {
+    await resetTokenRepo.deleteByUserId(userId).catch(() => undefined);
+    throw makeInvalidResetTokenError();
+  }
+
+  if (!isStrongPassword(novaSenha)) {
+    throw makeWeakPasswordError();
+  }
+
+  const hashedPassword = await bcrypt.hash(novaSenha, SALT_ROUNDS);
+  await userRepo.updatePassword(userId, hashedPassword);
+
+  // Cleanup completo: nem códigos nem tokens podem sobrar pendentes.
+  await resetTokenRepo.deleteByUserId(userId).catch(() => undefined);
+  await resetCodeRepo.deleteByUserId(userId).catch(() => undefined);
+
+  // Notificação não-bloqueante: se o SES falhar, log mas devolve sucesso —
+  // a senha já foi trocada com sucesso.
+  try {
+    await emailService.sendPasswordChangedEmail(user.email, user.nome);
+  } catch (err) {
+    logger.error('Falha no SES ao notificar troca de senha:', err);
+  }
+
+  return {
+    success: true,
+    message: 'Senha alterada com sucesso.',
+  };
 }

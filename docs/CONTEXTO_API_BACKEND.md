@@ -41,10 +41,11 @@ Sites municipais → Lambda Crawler → MongoDB (raw_crawls)
 1. Expõe a coleção `eventos` via endpoints REST com filtros e paginação
 2. Gerencia autenticação de usuários (cadastro, login) com JWT
 3. Envia emails de verificação via **AWS SES v2** e confirma a conta pela própria Lambda (HTML)
-4. Protege rotas com verificação de token JWT + `emailVerified`
-5. Fornece metadados auxiliares (lista de municípios e categorias)
+4. Permite **recuperação de senha** por código de 6 dígitos enviado por email
+5. Protege rotas com verificação de token JWT + `emailVerified`
+6. Fornece metadados auxiliares (lista de municípios e categorias)
 
-A API é **somente leitura** em relação a eventos — ela consulta a coleção `eventos` populada pelo NLP Processor. A escrita ocorre apenas em `users` (cadastro/verificação) e `emailVerificationTokens` (tokens temporários de verificação).
+A API é **somente leitura** em relação a eventos — ela consulta a coleção `eventos` populada pelo NLP Processor. A escrita ocorre em `users` (cadastro/verificação/troca de senha), `emailVerificationTokens`, `passwordResetCodes` e `passwordResetTokens` (todas com TTL).
 
 ---
 
@@ -211,6 +212,43 @@ interface EmailVerificationToken {
 
 > **Observação sobre o TTL:** o monitor TTL do MongoDB roda a cada ~60s, então um token expirado pode ficar no banco por até 60s antes de ser deletado. A rota `GET /auth/verify-email` checa `expiresAt > now` explicitamente além de confiar no TTL.
 
+### Coleção `passwordResetCodes` (escrita)
+
+```typescript
+interface PasswordResetCode {
+  _id?: ObjectId;
+  userId: ObjectId;   // referência ao user
+  code: string;       // 6 dígitos numéricos (crypto.randomInt)
+  expiresAt: Date;    // now + 15min
+  createdAt: Date;
+}
+```
+
+**Índices (criados automaticamente pela API na inicialização):**
+- `{ expiresAt: 1 }` com `expireAfterSeconds: 0` — **TTL**, auto-deleta documentos expirados
+- `{ userId: 1 }` — lookup por (userId, code) e cleanup
+
+> **Por que NÃO há índice único em `code`:** códigos curtos (6 dígitos = 1M possibilidades) não devem ser globalmente únicos. O lookup correto é sempre por `(userId, code)` — buscar só por `code` permitiria brute force trivial.
+
+### Coleção `passwordResetTokens` (escrita)
+
+```typescript
+interface PasswordResetToken {
+  _id?: ObjectId;
+  userId: ObjectId;   // referência ao user
+  token: string;      // hex de 64 chars (crypto.randomBytes(32))
+  expiresAt: Date;    // now + 15min
+  createdAt: Date;
+}
+```
+
+**Índices (criados automaticamente pela API na inicialização):**
+- `{ expiresAt: 1 }` com `expireAfterSeconds: 0` — **TTL**, auto-deleta documentos expirados
+- `{ token: 1 }` — único, lookup rápido na rota de troca de senha
+- `{ userId: 1 }` — cleanup ao gerar novo token / após reset bem-sucedido
+
+> **Separação de concerns:** o `code` (6 dígitos, curto, fácil de digitar) prova "você é dono desse email". Após validar, emite-se um `resetToken` (32 bytes hex) que é a credencial efetiva pra trocar a senha. Os dois ficam em coleções separadas com TTLs próprios. Ambos são single-use.
+
 ### Categorias válidas
 
 ```typescript
@@ -362,6 +400,122 @@ Endpoint **público** (sem `x-api-key`, sem JWT). Aberto pelo browser a partir d
 - **400** (token ausente/inválido/expirado): página HTML de erro com instrução pra solicitar novo link.
 
 Além do TTL do Mongo, a rota valida `expiresAt > now` explicitamente.
+
+#### `POST /auth/forgot-password`
+
+Inicia o fluxo de recuperação de senha. **Público (sem JWT).** Sempre retorna mensagem genérica (anti-enumeration).
+
+**Request body:**
+```json
+{ "email": "gabriel@email.com" }
+```
+
+**Response 200 (sempre):**
+```json
+{
+  "success": true,
+  "message": "Se o email estiver cadastrado, você receberá um código em alguns minutos."
+}
+```
+
+**Comportamento interno:**
+- Email não cadastrado → 200 sem fazer nada
+- Email cadastrado mas `emailVerified: false` → 200 sem fazer nada
+- Último código gerado tem `< 60s` (rate limit) → 200 sem reenviar
+- Caso contrário: deleta códigos antigos do user, gera código de 6 dígitos via `crypto.randomInt(100000, 1000000)`, salva em `passwordResetCodes` com `expiresAt = now + 15min` e dispara email via SES com o código
+
+#### `POST /auth/verify-reset-code`
+
+Valida o código digitado e devolve um `resetToken` que será usado na troca de senha. Diferentemente dos outros endpoints, **pode** retornar erro específico — sem isso a UX seria inviável (usuário ficaria preso sem saber se o código está errado).
+
+**Request body:**
+```json
+{
+  "email": "gabriel@email.com",
+  "code": "374829"
+}
+```
+
+**Validações:**
+- `email`: formato válido
+- `code`: string com exatamente 6 dígitos (regex `^[0-9]{6}$`)
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "resetToken": "a1b2c3d4...64chars"
+}
+```
+
+**Response 400 (código errado/expirado/inexistente):**
+```json
+{
+  "success": false,
+  "code": "INVALID_RESET_CODE",
+  "message": "Código inválido ou expirado."
+}
+```
+
+> Mesmo erro retornado se o email não existir — pra não vazar a existência da conta. O lookup é sempre `(userId, code)`, não só por `code` (proteção contra brute force).
+
+**Side effects ao validar com sucesso:**
+- Deleta o código (single-use)
+- Deleta tokens antigos do mesmo `userId` em `passwordResetTokens`
+- Gera `resetToken` (32 bytes hex) com `expiresAt = now + 15min`
+
+#### `POST /auth/reset-password`
+
+Efetiva a troca de senha. Exige um `resetToken` válido (obtido em `verify-reset-code`).
+
+**Request body:**
+```json
+{
+  "email": "gabriel@email.com",
+  "resetToken": "a1b2c3d4...64chars",
+  "novaSenha": "MinhaNovaSenh@123"
+}
+```
+
+**Validações server-side da `novaSenha` (mesmas do client em `src/utils/passwordValidator.ts`):**
+- Mínimo 8 caracteres
+- Pelo menos 1 letra maiúscula `[A-Z]`
+- Pelo menos 1 letra minúscula `[a-z]`
+- Pelo menos 1 dígito `[0-9]`
+- Pelo menos 1 caractere especial `[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>/?~`]`
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "message": "Senha alterada com sucesso."
+}
+```
+
+**Response 400 (token inválido/expirado/inexistente):**
+```json
+{
+  "success": false,
+  "code": "INVALID_RESET_TOKEN",
+  "message": "O processo de recuperação expirou. Solicite um novo código."
+}
+```
+
+**Response 400 (senha fraca):**
+```json
+{
+  "success": false,
+  "code": "WEAK_PASSWORD",
+  "message": "A senha não cumpre todos os requisitos de segurança."
+}
+```
+
+**Side effects ao trocar a senha com sucesso:**
+- `users.senha` recebe novo hash bcrypt (10 rounds)
+- Cleanup completo: deleta TODOS os `passwordResetTokens` E `passwordResetCodes` do `userId`
+- Envia email de notificação "sua senha foi alterada" via SES (não-bloqueante: se o SES falhar, log o erro mas ainda retorna 200 — a senha já foi trocada)
+
+> **JWTs antigos continuam válidos.** Hoje os tokens são stateless e não há blacklist. Implementar `tokenVersion` no payload é um follow-up planejado mas fora desta fase.
 
 ---
 
@@ -549,6 +703,31 @@ Retorna a lista fixa de categorias válidas.
    → Decodifica { userId, email } e injeta no request
    → Se inválido/expirado → 401
    → Se válido → prossegue para o handler da rota
+
+6. Recuperação de senha (todas públicas, sem JWT)
+   POST /auth/forgot-password
+     → Sempre 200 com mensagem genérica (anti-enumeration)
+     → Se user existe E emailVerified E último código tem >= 60s:
+         deleta códigos antigos, gera 6 dígitos via crypto.randomInt,
+         salva em passwordResetCodes (expiresAt = now + 15min),
+         envia email via SES com o código
+
+   POST /auth/verify-reset-code
+     → Lookup em passwordResetCodes por (userId, code) com expiresAt > now
+     → Inválido/expirado → 400 { code: 'INVALID_RESET_CODE' }
+     → Válido: deleta o código + tokens antigos do user, gera resetToken
+       (32 bytes hex, expiresAt = now + 15min) e salva em passwordResetTokens
+     → Retorna 200 com resetToken
+
+   POST /auth/reset-password
+     → Lookup em passwordResetTokens por token (e userId casa) com expiresAt > now
+     → Inválido/expirado → 400 { code: 'INVALID_RESET_TOKEN' }
+     → Valida força da senha (regex == frontend)
+       Falhou → 400 { code: 'WEAK_PASSWORD' }
+     → Hash bcrypt (10 rounds), updatePassword no users
+     → Cleanup completo: deleta TODOS os tokens E códigos do user
+     → Envia email "sua senha foi alterada" (não-bloqueante)
+     → Retorna 200
 ```
 
 ### Configuração JWT
@@ -568,35 +747,48 @@ src/
 ├── invoke-local.ts             ← servidor local para desenvolvimento (pnpm dev)
 ├── routes/
 │   ├── auth.routes.ts          ← POST /auth/register, POST /auth/login, GET /auth/me,
-│   │                             GET /auth/verify-email (HTML), POST /auth/resend-verification
+│   │                             GET /auth/verify-email (HTML), POST /auth/resend-verification,
+│   │                             POST /auth/forgot-password, POST /auth/verify-reset-code,
+│   │                             POST /auth/reset-password
 │   ├── evento.routes.ts        ← GET /eventos, GET /eventos/:id
 │   └── metadata.routes.ts      ← GET /municipios, GET /categorias
 ├── services/
-│   ├── auth.service.ts         ← register, login, verifyEmail, resendVerification, getMe
-│   ├── email.service.ts        ← sendVerificationEmail (AWS SES v2)
+│   ├── auth.service.ts         ← register, login, verifyEmail, resendVerification, getMe,
+│   │                             forgotPassword, verifyResetCode, resetPassword
+│   ├── email.service.ts        ← sendVerificationEmail, sendResetCodeEmail,
+│   │                             sendPasswordChangedEmail (AWS SES v2)
 │   └── evento.service.ts       ← queries com filtros, paginação, busca
 ├── hooks/
 │   └── auth.hook.ts            ← preHandler do Fastify que verifica JWT
 ├── database/
 │   ├── mongodb.connection.ts   ← conexão singleton (reutilizada entre invocações Lambda)
 │   └── repositories/
-│       ├── user.repository.ts  ← findByEmail, findById, insertUser, deleteById, markEmailVerified
+│       ├── user.repository.ts  ← findByEmail, findById, insertUser, deleteById,
+│       │                         markEmailVerified, updatePassword
 │       ├── emailVerification.repository.ts ← create, findByToken, deleteByUserId,
 │       │                                       deleteByToken, findLatestByUserId (+ TTL index)
+│       ├── passwordResetCode.repository.ts ← create, findByUserAndCode, deleteByUserId,
+│       │                                       findLatestByUserId (+ TTL index)
+│       ├── passwordResetToken.repository.ts ← create, findByToken, deleteByUserId
+│       │                                       (+ TTL index, unique no token)
 │       └── evento.repository.ts ← findEventos, findEventoById, getDistinctMunicipios
 ├── types/
 │   ├── user.types.ts           ← User, UserInsert, UserPublic (inclui emailVerified)
 │   ├── emailVerification.types.ts ← EmailVerificationToken, EmailVerificationTokenInsert
+│   ├── passwordReset.types.ts  ← PasswordResetCode, PasswordResetToken (+ Insert)
 │   ├── evento.types.ts         ← Evento, Categoria, CATEGORIAS_VALIDAS
 │   └── auth.types.ts           ← LoginBody, RegisterBody, ResendVerificationBody,
-│                                  VerifyEmailQuery, JwtPayload, VerifyEmailResult
+│                                  VerifyEmailQuery, JwtPayload, VerifyEmailResult,
+│                                  ForgotPasswordBody, VerifyResetCodeBody, ResetPasswordBody
 ├── schemas/
-│   ├── auth.schemas.ts         ← JSON Schema: register, login, resendVerification
+│   ├── auth.schemas.ts         ← JSON Schema: register, login, resendVerification,
+│   │                             forgotPassword, verifyResetCode, resetPassword
 │   │                             (verify-email NÃO usa schema — handler retorna HTML)
 │   └── evento.schemas.ts       ← JSON Schema para query params de listagem
 └── utils/
     ├── jwt.utils.ts            ← signToken, verifyToken, extractTokenFromHeader
     ├── emailVerifyPages.ts     ← renderSuccessPage, renderErrorPage, escapeHtml
+    ├── passwordValidator.ts    ← isStrongPassword (regex em sincronia com o frontend)
     └── logger.utils.ts         ← createLogger (mesmo padrão do NLP)
 ```
 
@@ -624,7 +816,7 @@ src/
 - `code` casa com `^[A-Z][A-Z0-9_]*$` (UPPER_SNAKE_CASE do nosso domínio)
 - `code` não começa com `FST_` (Fastify) nem `ERR_` (Node)
 
-Códigos ativos: `EMAIL_NOT_VERIFIED`.
+Códigos ativos: `EMAIL_NOT_VERIFIED`, `INVALID_RESET_CODE`, `INVALID_RESET_TOKEN`, `WEAK_PASSWORD`.
 
 ---
 

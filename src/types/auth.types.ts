@@ -17,6 +17,21 @@ export interface VerifyEmailQuery {
   token: string;
 }
 
+export interface ForgotPasswordBody {
+  email: string;
+}
+
+export interface VerifyResetCodeBody {
+  email: string;
+  code: string;
+}
+
+export interface ResetPasswordBody {
+  email: string;
+  resetToken: string;
+  novaSenha: string;
+}
+
 export interface JwtPayload {
   userId: string;
   email: string;

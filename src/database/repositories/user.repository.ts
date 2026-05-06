@@ -45,3 +45,11 @@ export async function markEmailVerified(id: ObjectId): Promise<void> {
   const col = await getCollection();
   await col.updateOne({ _id: id }, { $set: { emailVerified: true } });
 }
+
+export async function updatePassword(
+  id: ObjectId,
+  hashedPassword: string,
+): Promise<void> {
+  const col = await getCollection();
+  await col.updateOne({ _id: id }, { $set: { senha: hashedPassword } });
+}
