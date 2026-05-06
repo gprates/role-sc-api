@@ -32,6 +32,11 @@ export interface ResetPasswordBody {
   novaSenha: string;
 }
 
+export interface ChangePasswordBody {
+  senhaAtual: string;
+  novaSenha: string;
+}
+
 export interface JwtPayload {
   userId: string;
   email: string;

@@ -450,3 +450,83 @@ export async function resetPassword(
     message: 'Senha alterada com sucesso.',
   };
 }
+
+// ============================================================================
+// Alteração de senha (usuário logado)
+// ============================================================================
+//
+// Diferente do reset-password (prova = acesso ao email), aqui a prova é:
+// JWT válido + conhecimento da senha atual. A senha atual é exigida
+// porque o JWT sozinho não basta — defesa em profundidade contra token
+// vazado.
+//
+// Princípios (ver CONTRATO_ALTERAR_SENHA.md §10):
+// - Senhas NUNCA são logadas.
+// - Validação server-side independente do client.
+// - bcrypt.compare é constant-time (não comparar strings com === / equals).
+// - Email de notificação não bloqueia a request.
+// - JWTs antigos continuam válidos (decisão pragmática — ver §11).
+
+function makeInvalidCurrentPasswordError(): Error & { statusCode: number; code: string } {
+  const error = new Error('Senha atual incorreta.') as Error & {
+    statusCode: number;
+    code: string;
+  };
+  error.statusCode = 400;
+  error.code = 'INVALID_CURRENT_PASSWORD';
+  return error;
+}
+
+export async function changePassword(
+  userId: string,
+  senhaAtual: string,
+  novaSenha: string,
+): Promise<{ success: true; message: string }> {
+  const user = await userRepo.findById(userId);
+  // Caso defensivo: o JWT é válido mas o user sumiu do banco. Retornamos
+  // 401 (não 400) pra o frontend forçar logout via interceptor — é o que
+  // o app espera nessa condição.
+  if (!user) {
+    const error = new Error('Token inválido ou ausente.') as Error & {
+      statusCode: number;
+    };
+    error.statusCode = 401;
+    throw error;
+  }
+
+  const isCurrentValid = await bcrypt.compare(senhaAtual, user.senha);
+  if (!isCurrentValid) {
+    throw makeInvalidCurrentPasswordError();
+  }
+
+  if (!isStrongPassword(novaSenha)) {
+    throw makeWeakPasswordError();
+  }
+
+  // Trocar pela mesma senha não tem propósito; rejeitamos antes do hash
+  // (comparação plaintext — ambas vêm no mesmo request).
+  if (novaSenha === senhaAtual) {
+    const error = new Error(
+      'A nova senha não pode ser igual à atual.',
+    ) as Error & { statusCode: number; code: string };
+    error.statusCode = 400;
+    error.code = 'WEAK_PASSWORD';
+    throw error;
+  }
+
+  const hashedPassword = await bcrypt.hash(novaSenha, SALT_ROUNDS);
+  await userRepo.updatePassword(user._id!, hashedPassword);
+
+  // Notificação não-bloqueante: se o SES falhar, log mas devolve sucesso —
+  // a senha já foi trocada com sucesso.
+  try {
+    await emailService.sendPasswordChangedEmail(user.email, user.nome);
+  } catch (err) {
+    logger.error('Falha no SES ao notificar troca de senha:', err);
+  }
+
+  return {
+    success: true,
+    message: 'Senha alterada com sucesso.',
+  };
+}

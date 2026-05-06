@@ -42,8 +42,9 @@ Sites municipais → Lambda Crawler → MongoDB (raw_crawls)
 2. Gerencia autenticação de usuários (cadastro, login) com JWT
 3. Envia emails de verificação via **AWS SES v2** e confirma a conta pela própria Lambda (HTML)
 4. Permite **recuperação de senha** por código de 6 dígitos enviado por email
-5. Protege rotas com verificação de token JWT + `emailVerified`
-6. Fornece metadados auxiliares (lista de municípios e categorias)
+5. Permite **alteração de senha** por usuário logado (exige senha atual)
+6. Protege rotas com verificação de token JWT + `emailVerified`
+7. Fornece metadados auxiliares (lista de municípios e categorias)
 
 A API é **somente leitura** em relação a eventos — ela consulta a coleção `eventos` populada pelo NLP Processor. A escrita ocorre em `users` (cadastro/verificação/troca de senha), `emailVerificationTokens`, `passwordResetCodes` e `passwordResetTokens` (todas com TTL).
 
@@ -590,6 +591,73 @@ Retorna os dados do usuário logado.
 }
 ```
 
+#### `POST /auth/change-password`
+
+Altera a senha do usuário logado. Diferente do `/auth/reset-password` (prova = acesso ao email), aqui a prova é JWT válido **+ conhecimento da senha atual**. A senha atual é exigida como defesa em profundidade contra JWT vazado.
+
+**Request body:**
+```json
+{
+  "senhaAtual": "MinhaSenha@123",
+  "novaSenha": "NovaSenh@456"
+}
+```
+
+**Validações server-side da `novaSenha` (mesmas do `reset-password`):**
+- Mínimo 8 caracteres + 1 maiúscula + 1 minúscula + 1 dígito + 1 caractere especial
+- **Não pode ser igual à senha atual** (comparação plaintext antes do hash)
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "message": "Senha alterada com sucesso."
+}
+```
+
+**Response 400 (senha atual incorreta):**
+```json
+{
+  "success": false,
+  "code": "INVALID_CURRENT_PASSWORD",
+  "message": "Senha atual incorreta."
+}
+```
+
+**Response 400 (nova senha fraca):**
+```json
+{
+  "success": false,
+  "code": "WEAK_PASSWORD",
+  "message": "A senha não cumpre todos os requisitos de segurança."
+}
+```
+
+**Response 400 (nova senha igual à atual):**
+```json
+{
+  "success": false,
+  "code": "WEAK_PASSWORD",
+  "message": "A nova senha não pode ser igual à atual."
+}
+```
+
+**Response 401 (JWT inválido OU userId do JWT aponta pra user inexistente):**
+```json
+{
+  "success": false,
+  "message": "Token inválido ou ausente."
+}
+```
+
+> O caso "userId do JWT aponta pra user inexistente" é defensivo (raro) — retornamos 401 (não 400) pra o frontend forçar logout via interceptor global. Não retornamos `INVALID_CURRENT_PASSWORD` aqui pra não permitir distinguir as duas situações.
+
+**Side effects ao trocar a senha com sucesso:**
+- `users.senha` recebe novo hash bcrypt (10 rounds)
+- Envia email de notificação "sua senha foi alterada" via SES (mesmo template do `reset-password`, função reusada `sendPasswordChangedEmail`). Não-bloqueante: se SES falhar, log e ainda retorna 200.
+
+> **JWTs antigos continuam válidos.** Mesma decisão pragmática do `reset-password` — implementar `tokenVersion` é follow-up.
+
 #### `GET /eventos`
 
 Lista eventos com filtros e paginação. Retorna **apenas** documentos com `isEvent: true`.
@@ -768,6 +836,20 @@ Retorna a lista fixa de categorias válidas.
      → Cleanup completo: deleta TODOS os tokens E códigos do user
      → Envia email "sua senha foi alterada" (não-bloqueante)
      → Retorna 200
+
+7. Alteração de senha por usuário logado (JWT obrigatório)
+   POST /auth/change-password   (preHandler: authHook)
+     → Busca user por userId do JWT
+     → User não existe → 401 (caso defensivo, força logout no client)
+     → bcrypt.compare(senhaAtual, user.senha) — constant-time
+       Falhou → 400 { code: 'INVALID_CURRENT_PASSWORD' }
+     → Valida força da novaSenha
+       Falhou → 400 { code: 'WEAK_PASSWORD' }
+     → novaSenha === senhaAtual → 400 { code: 'WEAK_PASSWORD',
+                                         message: "A nova senha não pode ser igual à atual." }
+     → Hash bcrypt (10 rounds), updatePassword no users
+     → Envia email "sua senha foi alterada" (mesmo template do reset, não-bloqueante)
+     → Retorna 200
 ```
 
 ### Configuração JWT
@@ -789,12 +871,13 @@ src/
 │   ├── auth.routes.ts          ← POST /auth/register, POST /auth/login, GET /auth/me,
 │   │                             GET /auth/verify-email (HTML), POST /auth/resend-verification,
 │   │                             POST /auth/forgot-password, POST /auth/verify-reset-code,
-│   │                             POST /auth/reset-password
+│   │                             POST /auth/reset-password, POST /auth/change-password
 │   ├── evento.routes.ts        ← GET /eventos, GET /eventos/:id
 │   └── metadata.routes.ts      ← GET /municipios, GET /categorias
 ├── services/
 │   ├── auth.service.ts         ← register, login, verifyEmail, resendVerification, getMe,
-│   │                             forgotPassword, verifyResetCode, resetPassword
+│   │                             forgotPassword, verifyResetCode, resetPassword,
+│   │                             changePassword
 │   ├── email.service.ts        ← sendVerificationEmail, sendResetCodeEmail,
 │   │                             sendPasswordChangedEmail (AWS SES v2)
 │   └── evento.service.ts       ← queries com filtros, paginação, busca
@@ -819,10 +902,12 @@ src/
 │   ├── evento.types.ts         ← Evento, Categoria, CATEGORIAS_VALIDAS
 │   └── auth.types.ts           ← LoginBody, RegisterBody, ResendVerificationBody,
 │                                  VerifyEmailQuery, JwtPayload, VerifyEmailResult,
-│                                  ForgotPasswordBody, VerifyResetCodeBody, ResetPasswordBody
+│                                  ForgotPasswordBody, VerifyResetCodeBody, ResetPasswordBody,
+│                                  ChangePasswordBody
 ├── schemas/
 │   ├── auth.schemas.ts         ← JSON Schema: register, login, resendVerification,
-│   │                             forgotPassword, verifyResetCode, resetPassword
+│   │                             forgotPassword, verifyResetCode, resetPassword,
+│   │                             changePassword
 │   │                             (verify-email NÃO usa schema — handler retorna HTML)
 │   └── evento.schemas.ts       ← JSON Schema para query params de listagem
 └── utils/
@@ -856,7 +941,7 @@ src/
 - `code` casa com `^[A-Z][A-Z0-9_]*$` (UPPER_SNAKE_CASE do nosso domínio)
 - `code` não começa com `FST_` (Fastify) nem `ERR_` (Node)
 
-Códigos ativos: `EMAIL_NOT_VERIFIED`, `USER_NOT_FOUND`, `INVALID_RESET_CODE`, `INVALID_RESET_TOKEN`, `WEAK_PASSWORD`.
+Códigos ativos: `EMAIL_NOT_VERIFIED`, `USER_NOT_FOUND`, `INVALID_RESET_CODE`, `INVALID_RESET_TOKEN`, `WEAK_PASSWORD`, `INVALID_CURRENT_PASSWORD`.
 
 ---
 

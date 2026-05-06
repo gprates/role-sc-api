@@ -6,6 +6,7 @@ import {
   forgotPasswordSchema,
   verifyResetCodeSchema,
   resetPasswordSchema,
+  changePasswordSchema,
 } from '../schemas/auth.schemas.js';
 import * as authService from '../services/auth.service.js';
 import { authHook } from '../hooks/auth.hook.js';
@@ -21,6 +22,7 @@ import type {
   ForgotPasswordBody,
   VerifyResetCodeBody,
   ResetPasswordBody,
+  ChangePasswordBody,
 } from '../types/auth.types.js';
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
@@ -97,6 +99,18 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       return authService.resetPassword(
         request.body.email,
         request.body.resetToken,
+        request.body.novaSenha,
+      );
+    },
+  );
+
+  app.post<{ Body: ChangePasswordBody }>(
+    '/change-password',
+    { schema: changePasswordSchema, preHandler: authHook },
+    async (request) => {
+      return authService.changePassword(
+        request.jwtPayload.userId,
+        request.body.senhaAtual,
         request.body.novaSenha,
       );
     },

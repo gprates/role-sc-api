@@ -77,6 +77,20 @@ export const resetPasswordSchema = {
   },
 } as const;
 
+// senhaAtual NÃO valida força — é só "o que o usuário tem no momento".
+// Força da novaSenha é validada no service (ver nota acima).
+export const changePasswordSchema = {
+  body: {
+    type: 'object',
+    required: ['senhaAtual', 'novaSenha'],
+    properties: {
+      senhaAtual: { type: 'string', minLength: 1 },
+      novaSenha: { type: 'string', minLength: 1 },
+    },
+    additionalProperties: false,
+  },
+} as const;
+
 // Nota: /auth/verify-email NÃO usa JSON Schema porque a resposta é sempre
 // text/html. Qualquer validação do Fastify retornaria 400 JSON — o handler
 // valida manualmente e devolve HTML de erro.
