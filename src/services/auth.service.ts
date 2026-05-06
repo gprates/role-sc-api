@@ -238,9 +238,14 @@ export async function resendVerification(
 // ============================================================================
 //
 // Princípios (ver CONTRATO_RECUPERACAO_SENHA.md §10):
-// - Antienumeration em forgot-password e reset-password (sem vazar se email
-//   existe). verify-reset-code é a exceção: precisa retornar erro específico
-//   pra UX viável.
+// - forgot-password NÃO tem antienumeration (decisão consciente do dono do
+//   produto): retorna 404 USER_NOT_FOUND ou 403 EMAIL_NOT_VERIFIED. UX
+//   explícita ("email não cadastrado, quer criar conta?") foi priorizada
+//   sobre proteção contra enumeration. Compensação prevista: rate limit por
+//   IP — ainda não implementado, anotado como follow-up no contrato.
+// - Antienumeration MANTIDO em verify-reset-code e reset-password: quando o
+//   usuário já está com código/token em mãos, esconder informação não traz
+//   ganho real de segurança e quebraria a UX.
 // - Códigos e tokens NUNCA são logados.
 // - Cleanup agressivo: ao validar/usar, deleta todos os pendentes do user.
 // - Email de notificação no reset não bloqueia: se SES falhar, ainda OK.
@@ -251,24 +256,40 @@ function generateNumericCode(): string {
   return randomInt(100000, 1000000).toString();
 }
 
+function makeUserNotFoundError(): Error & { statusCode: number; code: string } {
+  const error = new Error(
+    'Não encontramos uma conta com esse email.',
+  ) as Error & { statusCode: number; code: string };
+  error.statusCode = 404;
+  error.code = 'USER_NOT_FOUND';
+  return error;
+}
+
+function makeEmailNotVerifiedError(): Error & { statusCode: number; code: string } {
+  const error = new Error(
+    'Verifique seu email antes de redefinir a senha.',
+  ) as Error & { statusCode: number; code: string };
+  error.statusCode = 403;
+  error.code = 'EMAIL_NOT_VERIFIED';
+  return error;
+}
+
 export async function forgotPassword(
   email: string,
 ): Promise<{ success: true; message: string }> {
-  const genericResponse = {
-    success: true as const,
-    message:
-      'Se o email estiver cadastrado, você receberá um código em alguns minutos.',
-  };
-
   const user = await userRepo.findByEmail(email);
-  // Antienumeration: tratamos email inexistente e email não verificado
-  // exatamente como o caminho feliz. Não vazamos qual dos dois.
-  if (!user || user.emailVerified !== true) {
-    return genericResponse;
+  if (!user) {
+    throw makeUserNotFoundError();
+  }
+  if (user.emailVerified !== true) {
+    throw makeEmailNotVerifiedError();
   }
 
   const userId = user._id!;
 
+  // Rate limit: 60s entre requests pro MESMO email. Diferente das duas branches
+  // acima, aqui retornamos 200 (não 429) — a conta existe e está OK, apenas
+  // pedimos pra esperar. O frontend já mostra cooldown de reenvio na UI.
   const latest = await resetCodeRepo.findLatestByUserId(userId);
   if (
     latest &&
@@ -277,7 +298,11 @@ export async function forgotPassword(
     logger.info(
       `Rate limit atingido em forgot-password para userId=${userId.toString()}`,
     );
-    return genericResponse;
+    return {
+      success: true,
+      message:
+        'Já enviamos um código recentemente. Aguarde alguns instantes antes de pedir outro.',
+    };
   }
 
   await resetCodeRepo.deleteByUserId(userId);
@@ -285,28 +310,30 @@ export async function forgotPassword(
   const code = generateNumericCode();
   const now = new Date();
 
-  try {
-    await resetCodeRepo.create({
-      userId,
-      code,
-      expiresAt: new Date(now.getTime() + RESET_CODE_TTL_MS),
-      createdAt: now,
-    });
-  } catch (err) {
-    // Sem expor detalhes pro caller — antienumeration mantém a resposta.
-    logger.error('Falha ao gerar código em forgot-password:', err);
-    return genericResponse;
-  }
+  await resetCodeRepo.create({
+    userId,
+    code,
+    expiresAt: new Date(now.getTime() + RESET_CODE_TTL_MS),
+    createdAt: now,
+  });
 
   try {
     await emailService.sendResetCodeEmail(user.email, user.nome, code);
   } catch (err) {
     logger.error('Falha no SES em forgot-password:', err);
-    // Cleanup: se o email não saiu, o código não tem utilidade.
+    // Cleanup: se o email não saiu, o código não tem utilidade pro user.
     await resetCodeRepo.deleteByUserId(userId).catch(() => undefined);
+    const error = new Error(
+      'Falha ao enviar email de recuperação. Tente novamente em alguns minutos.',
+    ) as Error & { statusCode: number };
+    error.statusCode = 500;
+    throw error;
   }
 
-  return genericResponse;
+  return {
+    success: true,
+    message: 'Código enviado para o seu email.',
+  };
 }
 
 function makeInvalidResetCodeError(): Error & { statusCode: number; code: string } {

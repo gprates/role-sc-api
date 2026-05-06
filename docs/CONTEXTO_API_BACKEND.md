@@ -403,25 +403,63 @@ Além do TTL do Mongo, a rota valida `expiresAt > now` explicitamente.
 
 #### `POST /auth/forgot-password`
 
-Inicia o fluxo de recuperação de senha. **Público (sem JWT).** Sempre retorna mensagem genérica (anti-enumeration).
+Inicia o fluxo de recuperação de senha. **Público (sem JWT).**
+
+> **Decisão de produto:** este endpoint **não tem antienumeration**. Retornamos 404/403 explícitos quando o email não existe ou não está verificado. UX explícita ("email não cadastrado, quer criar conta?") foi priorizada sobre proteção contra enumeration. Compensação prevista: **rate limit por IP** (follow-up — ainda não implementado).
 
 **Request body:**
 ```json
 { "email": "gabriel@email.com" }
 ```
 
-**Response 200 (sempre):**
+**Response 200 (código enviado):**
 ```json
 {
   "success": true,
-  "message": "Se o email estiver cadastrado, você receberá um código em alguns minutos."
+  "message": "Código enviado para o seu email."
+}
+```
+
+**Response 200 (rate limit — código já enviado recentemente):**
+```json
+{
+  "success": true,
+  "message": "Já enviamos um código recentemente. Aguarde alguns instantes antes de pedir outro."
+}
+```
+
+**Response 404 (email não cadastrado):**
+```json
+{
+  "success": false,
+  "code": "USER_NOT_FOUND",
+  "message": "Não encontramos uma conta com esse email."
+}
+```
+
+**Response 403 (conta existe mas não verificada):**
+```json
+{
+  "success": false,
+  "code": "EMAIL_NOT_VERIFIED",
+  "message": "Verifique seu email antes de redefinir a senha."
+}
+```
+
+**Response 500 (falha no envio do email):**
+
+Se o SES falhar, o código gerado é deletado e a API responde:
+```json
+{
+  "success": false,
+  "message": "Falha ao enviar email de recuperação. Tente novamente em alguns minutos."
 }
 ```
 
 **Comportamento interno:**
-- Email não cadastrado → 200 sem fazer nada
-- Email cadastrado mas `emailVerified: false` → 200 sem fazer nada
-- Último código gerado tem `< 60s` (rate limit) → 200 sem reenviar
+- Email não cadastrado → 404 `USER_NOT_FOUND`
+- Email cadastrado mas `emailVerified: false` → 403 `EMAIL_NOT_VERIFIED`
+- Último código gerado tem `< 60s` (rate limit por email) → 200 com mensagem amigável, sem reenviar
 - Caso contrário: deleta códigos antigos do user, gera código de 6 dígitos via `crypto.randomInt(100000, 1000000)`, salva em `passwordResetCodes` com `expiresAt = now + 15min` e dispara email via SES com o código
 
 #### `POST /auth/verify-reset-code`
@@ -705,12 +743,14 @@ Retorna a lista fixa de categorias válidas.
    → Se válido → prossegue para o handler da rota
 
 6. Recuperação de senha (todas públicas, sem JWT)
-   POST /auth/forgot-password
-     → Sempre 200 com mensagem genérica (anti-enumeration)
-     → Se user existe E emailVerified E último código tem >= 60s:
-         deleta códigos antigos, gera 6 dígitos via crypto.randomInt,
-         salva em passwordResetCodes (expiresAt = now + 15min),
-         envia email via SES com o código
+   POST /auth/forgot-password  (SEM antienumeration — decisão consciente)
+     → Email não cadastrado → 404 { code: 'USER_NOT_FOUND' }
+     → Email cadastrado mas !emailVerified → 403 { code: 'EMAIL_NOT_VERIFIED' }
+     → Último código com < 60s (rate limit por email) → 200 com mensagem
+       "código já enviado, aguarde" (SEM reenviar)
+     → Caso normal: deleta códigos antigos, gera 6 dígitos via
+       crypto.randomInt, salva em passwordResetCodes (expiresAt = now + 15min),
+       envia email via SES. Se o SES falhar: deleta o código e retorna 500.
 
    POST /auth/verify-reset-code
      → Lookup em passwordResetCodes por (userId, code) com expiresAt > now
@@ -816,7 +856,7 @@ src/
 - `code` casa com `^[A-Z][A-Z0-9_]*$` (UPPER_SNAKE_CASE do nosso domínio)
 - `code` não começa com `FST_` (Fastify) nem `ERR_` (Node)
 
-Códigos ativos: `EMAIL_NOT_VERIFIED`, `INVALID_RESET_CODE`, `INVALID_RESET_TOKEN`, `WEAK_PASSWORD`.
+Códigos ativos: `EMAIL_NOT_VERIFIED`, `USER_NOT_FOUND`, `INVALID_RESET_CODE`, `INVALID_RESET_TOKEN`, `WEAK_PASSWORD`.
 
 ---
 
