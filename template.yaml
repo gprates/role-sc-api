@@ -29,6 +29,14 @@ Parameters:
   AppBaseUrl:
     Type: String
     Description: Base URL pública da API, usada para montar o link no email (sem barra final)
+  S3AvatarsBucket:
+    Type: String
+    Description: Nome do bucket S3 para armazenar avatares de usuário
+    Default: role-sc-avatars
+  S3AvatarsRegion:
+    Type: String
+    Description: Região do bucket S3 de avatares (mesma da Lambda recomendada)
+    Default: sa-east-1
 
 Globals:
   Function:
@@ -65,6 +73,8 @@ Resources:
           SES_FROM_EMAIL: !Ref SesFromEmail
           SES_AWS_REGION: !Ref SesAwsRegion
           APP_BASE_URL: !Ref AppBaseUrl
+          S3_AVATARS_BUCKET: !Ref S3AvatarsBucket
+          S3_AVATARS_REGION: !Ref S3AvatarsRegion
       Policies:
         - Version: '2012-10-17'
           Statement:
@@ -73,6 +83,14 @@ Resources:
                 - ses:SendEmail
                 - ses:SendRawEmail
               Resource: '*'
+            # Avatares: presigned PUT, HEAD/GET de validação no confirm e
+            # DeleteObject (reservado pra cleanup futuro — ex.: deletar conta).
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+                - s3:DeleteObject
+              Resource: !Sub 'arn:aws:s3:::${S3AvatarsBucket}/avatars/*'
       Events:
         # Rota pública: clicada pelo browser a partir do link do email.
         # NÃO exige x-api-key porque o usuário não tem como informar a chave.
@@ -91,6 +109,42 @@ Resources:
             Path: /{proxy+}
             Method: ANY
             RestApiId: !Ref RoleScRestApi
+
+  RoleScAvatarsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3AvatarsBucket
+      # IMPORTANTE: os 4 blocks padrão da AWS (true desde 2023) precisam ficar
+      # OFF pra a bucket policy pública abaixo funcionar. Sem isso, mesmo a
+      # policy correta é ignorada.
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins: ['*']
+            AllowedMethods: [GET, PUT, HEAD]
+            AllowedHeaders: ['*']
+            ExposedHeaders: [ETag]
+            MaxAge: 3000
+
+  RoleScAvatarsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref RoleScAvatarsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PublicReadAvatars
+            Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub 'arn:aws:s3:::${RoleScAvatarsBucket}/avatars/*'
 
   RoleScRestApi:
     Type: AWS::Serverless::Api
@@ -148,3 +202,9 @@ Outputs:
   ApiKeyId:
     Description: ID da API Key (use 'aws apigateway get-api-key --api-key <id> --include-value' para ver o valor)
     Value: !Ref RoleScApiKey
+  AvatarsBucketName:
+    Description: Nome do bucket S3 para avatares
+    Value: !Ref RoleScAvatarsBucket
+  AvatarsBucketUrl:
+    Description: Base URL pública dos avatares
+    Value: !Sub 'https://${RoleScAvatarsBucket}.s3.${S3AvatarsRegion}.amazonaws.com'

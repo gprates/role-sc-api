@@ -31,6 +31,9 @@ function toPublicUser(user: User): UserPublic {
     nome: user.nome,
     email: user.email,
     emailVerified: user.emailVerified === true,
+    // Só inclui avatarUrl no payload se o user já fez upload — caso contrário
+    // o campo é omitido e o frontend renderiza fallback.
+    ...(user.avatarUrl ? { avatarUrl: user.avatarUrl } : {}),
     createdAt: user.createdAt,
   };
 }

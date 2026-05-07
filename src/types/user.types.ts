@@ -6,6 +6,9 @@ export interface User {
   email: string;
   senha: string;
   emailVerified: boolean;
+  // URL pública do avatar no S3, com cache busting (?v=timestamp).
+  // undefined = nunca fez upload — frontend renderiza fallback (gradiente).
+  avatarUrl?: string;
   createdAt: Date;
 }
 
@@ -16,5 +19,6 @@ export interface UserPublic {
   nome: string;
   email: string;
   emailVerified: boolean;
+  avatarUrl?: string;
   createdAt: Date;
 }

@@ -43,8 +43,9 @@ Sites municipais → Lambda Crawler → MongoDB (raw_crawls)
 3. Envia emails de verificação via **AWS SES v2** e confirma a conta pela própria Lambda (HTML)
 4. Permite **recuperação de senha** por código de 6 dígitos enviado por email
 5. Permite **alteração de senha** por usuário logado (exige senha atual)
-6. Protege rotas com verificação de token JWT + `emailVerified`
-7. Fornece metadados auxiliares (lista de municípios e categorias)
+6. Permite **upload de avatar** via presigned URL no S3 (cliente envia direto pro bucket)
+7. Protege rotas com verificação de token JWT + `emailVerified`
+8. Fornece metadados auxiliares (lista de municípios e categorias)
 
 A API é **somente leitura** em relação a eventos — ela consulta a coleção `eventos` populada pelo NLP Processor. A escrita ocorre em `users` (cadastro/verificação/troca de senha), `emailVerificationTokens`, `passwordResetCodes` e `passwordResetTokens` (todas com TTL).
 
@@ -64,6 +65,8 @@ A API é **somente leitura** em relação a eventos — ela consulta a coleção
 | bcryptjs | ^3.0 | Hash de senhas (puro JS, sem binários nativos) |
 | jsonwebtoken | ^9.0 | JWT |
 | @aws-sdk/client-sesv2 | ^3.1036 | Envio de email de verificação (AWS SES v2) |
+| @aws-sdk/client-s3 | ^3.1043 | Operações no bucket de avatares (HEAD/GET/PUT/DELETE) |
+| @aws-sdk/s3-request-presigner | ^3.1043 | Presigned PUT URLs para upload direto do cliente |
 | dotenv | ^17.4 | Variáveis de ambiente (dev local) |
 | tsx | ^4.21 | Execução local TypeScript |
 | esbuild | ^0.28 | Bundler para Lambda |
@@ -84,6 +87,8 @@ A API é **somente leitura** em relação a eventos — ela consulta a coleção
 | API Gateway | `role-sc-api` | `AWS::Serverless::Api` (REST API) |
 | API Key | `role-sc-api-key` | `AWS::ApiGateway::ApiKey` |
 | Usage Plan | `role-sc-usage-plan` | `AWS::ApiGateway::UsagePlan` |
+| Bucket S3 (avatares) | `role-sc-avatars` (parametrizável) | `AWS::S3::Bucket` |
+| Bucket Policy | — | `AWS::S3::BucketPolicy` (`s3:GetObject` público pra `avatars/*`) |
 
 ### Configuração da Lambda
 
@@ -105,6 +110,8 @@ A API é **somente leitura** em relação a eventos — ela consulta a coleção
 | `SES_FROM_EMAIL` | Remetente verificado no SES (email pessoal do dev ou do domínio) |
 | `SES_AWS_REGION` | Região do SES (usar `us-east-1`; `sa-east-1` não tem SES) |
 | `APP_BASE_URL` | Base URL pública da API, usada para montar o link no email (sem barra final) |
+| `S3_AVATARS_BUCKET` | Nome do bucket S3 de avatares (`role-sc-avatars`) |
+| `S3_AVATARS_REGION` | Região do bucket S3 (`sa-east-1`) |
 
 ### Segurança do API Gateway
 
@@ -187,6 +194,7 @@ interface User {
   email: string;           // índice único
   senha: string;           // hash bcrypt (nunca retornar em responses)
   emailVerified: boolean;  // false no cadastro, true após clicar no link do email
+  avatarUrl?: string;      // URL pública S3 com cache busting (?v=). undefined = sem upload
   createdAt: Date;
 }
 ```
@@ -249,6 +257,25 @@ interface PasswordResetToken {
 - `{ userId: 1 }` — cleanup ao gerar novo token / após reset bem-sucedido
 
 > **Separação de concerns:** o `code` (6 dígitos, curto, fácil de digitar) prova "você é dono desse email". Após validar, emite-se um `resetToken` (32 bytes hex) que é a credencial efetiva pra trocar a senha. Os dois ficam em coleções separadas com TTLs próprios. Ambos são single-use.
+
+### Bucket S3 `role-sc-avatars` (escrita + leitura pública)
+
+Avatares dos usuários são armazenados em um bucket S3 dedicado, em `sa-east-1`.
+
+| Aspecto | Configuração |
+|---------|--------------|
+| Estratégia de key | `avatars/{userId}` — sem extensão, Content-Type fica em metadata |
+| Reupload | Sobrescreve a mesma key (sem orfãos, sem cleanup) |
+| Leitura | **Pública** (`s3:GetObject` para `avatars/*` via bucket policy). URLs servidas direto do S3, sem presigned URL no GET. |
+| Escrita | **Presigned PUT URL** gerada pela Lambda (TTL 5min) — cliente envia direto pro S3 sem passar pela API |
+| Tipos aceitos | `image/jpeg`, `image/png`, `image/webp`, `image/gif` |
+| Tamanho máximo | 5 MB |
+| Cache busting | URL pública retornada com `?v={timestamp}` — força o `<Image>` do RN a buscar de novo |
+| CORS | `GET, PUT, HEAD` com `AllowedOrigins: ['*']` e `ExposedHeaders: [ETag]` |
+
+> **Por que o bucket é público?** Avatar não tem requisito de privacidade. URL pública = sem custo extra de presigned URL pra cada visualização + permite cache no app/CDN. Se um dia houver avatares opcionalmente privados, migrar pra presigned no GET.
+
+> **`PublicAccessBlockConfiguration` precisa estar OFF** nos 4 flags pra a bucket policy pública funcionar — desde 2023 a AWS bloqueia por padrão.
 
 ### Categorias válidas
 
@@ -346,10 +373,13 @@ Autentica e retorna JWT. **Exige `emailVerified: true` no usuário.**
     "nome": "Gabriel Prates",
     "email": "gabriel@email.com",
     "emailVerified": true,
+    "avatarUrl": "https://role-sc-avatars.s3.sa-east-1.amazonaws.com/avatars/664a...?v=1730859240000",
     "createdAt": "2026-04-14T12:00:00.000Z"
   }
 }
 ```
+
+> O campo `avatarUrl` é **opcional** — só vem no payload se o usuário já fez upload. Frontend renderiza fallback (gradiente com inicial) quando ausente.
 
 **Response 401 (credenciais inválidas):**
 ```json
@@ -586,10 +616,13 @@ Retorna os dados do usuário logado.
     "nome": "Gabriel Prates",
     "email": "gabriel@email.com",
     "emailVerified": true,
+    "avatarUrl": "https://role-sc-avatars.s3.sa-east-1.amazonaws.com/avatars/664a...?v=1730859240000",
     "createdAt": "2026-04-14T12:00:00.000Z"
   }
 }
 ```
+
+> `avatarUrl` é **opcional** — omitido do payload quando o usuário ainda não fez upload.
 
 #### `POST /auth/change-password`
 
@@ -657,6 +690,99 @@ Altera a senha do usuário logado. Diferente do `/auth/reset-password` (prova = 
 - Envia email de notificação "sua senha foi alterada" via SES (mesmo template do `reset-password`, função reusada `sendPasswordChangedEmail`). Não-bloqueante: se SES falhar, log e ainda retorna 200.
 
 > **JWTs antigos continuam válidos.** Mesma decisão pragmática do `reset-password` — implementar `tokenVersion` é follow-up.
+
+#### `POST /users/me/avatar/upload-url`
+
+Gera uma presigned URL pra o frontend fazer PUT direto no S3, sem passar pela Lambda. **Autenticado (JWT).**
+
+**Request body:**
+```json
+{
+  "contentType": "image/png",
+  "sizeBytes": 245678
+}
+```
+
+**Validações:**
+- `contentType`: deve ser um de `image/jpeg`, `image/png`, `image/webp`, `image/gif`
+- `sizeBytes`: integer ≥ 0 e ≤ 5242880 (5 MB)
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "uploadUrl": "https://role-sc-avatars.s3.sa-east-1.amazonaws.com/avatars/664a...?X-Amz-Signature=...",
+  "key": "avatars/664a1b2c3d4e5f6a7b8c9d0e",
+  "headers": { "Content-Type": "image/png" }
+}
+```
+
+> **Headers obrigatórios no PUT:** o frontend precisa enviar EXATAMENTE o que vem em `headers` (`Content-Type` foi parte da assinatura — se não bater no PUT, o S3 rejeita com 403).
+
+**Response 400 (`AVATAR_INVALID_TYPE`):**
+```json
+{
+  "success": false,
+  "code": "AVATAR_INVALID_TYPE",
+  "message": "Apenas JPG, PNG, WebP e GIF são suportados."
+}
+```
+
+**Response 400 (`AVATAR_TOO_LARGE`):**
+```json
+{
+  "success": false,
+  "code": "AVATAR_TOO_LARGE",
+  "message": "Imagem maior que o limite de 5MB."
+}
+```
+
+**Lógica interna:**
+- `key = "avatars/" + userId` (do JWT)
+- Presigned PUT com `expiresIn: 300` (5min) usando `@aws-sdk/s3-request-presigner`
+
+#### `POST /users/me/avatar/confirm`
+
+Chamado pelo frontend após o PUT no S3 retornar sucesso. Backend faz `HEAD` pra validar e atualiza `users.avatarUrl`. **Autenticado (JWT).**
+
+**Request body:**
+```json
+{
+  "key": "avatars/664a1b2c3d4e5f6a7b8c9d0e"
+}
+```
+
+**Validações:**
+- `key` deve começar com `avatars/{userId}` do JWT — defesa contra IDOR (confirmar avatar de outro user)
+- `head.ContentLength` ≤ 5 MB
+- `head.ContentType` ∈ tipos aceitos
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "avatarUrl": "https://role-sc-avatars.s3.sa-east-1.amazonaws.com/avatars/664a...?v=1730859240000"
+}
+```
+
+**Response 400 (`AVATAR_NOT_UPLOADED`):**
+```json
+{
+  "success": false,
+  "code": "AVATAR_NOT_UPLOADED",
+  "message": "O upload não foi finalizado. Tente novamente."
+}
+```
+
+**Response 400 (`AVATAR_TOO_LARGE` / `AVATAR_INVALID_TYPE`):**
+Mesmos shapes do `/upload-url`. Defesa em profundidade — o cliente pode ter mentido o `sizeBytes`/`contentType` no upload-url.
+
+**Lógica interna:**
+- Validar `key === "avatars/" + userId`. Se não bater → 400 `AVATAR_NOT_UPLOADED` (mesmo erro de objeto inexistente — não distinguimos pra não vazar tentativa de IDOR)
+- `HeadObjectCommand` no bucket. NotFound (404) → 400 `AVATAR_NOT_UPLOADED`
+- Validar tamanho e Content-Type do que o S3 efetivamente recebeu
+- Construir `avatarUrl = https://{bucket}.s3.{region}.amazonaws.com/{key}?v={Date.now()}`
+- `users.avatarUrl = avatarUrl`
 
 #### `GET /eventos`
 
@@ -873,11 +999,13 @@ src/
 │   │                             POST /auth/forgot-password, POST /auth/verify-reset-code,
 │   │                             POST /auth/reset-password, POST /auth/change-password
 │   ├── evento.routes.ts        ← GET /eventos, GET /eventos/:id
+│   ├── user.routes.ts          ← POST /users/me/avatar/upload-url, POST /users/me/avatar/confirm
 │   └── metadata.routes.ts      ← GET /municipios, GET /categorias
 ├── services/
 │   ├── auth.service.ts         ← register, login, verifyEmail, resendVerification, getMe,
 │   │                             forgotPassword, verifyResetCode, resetPassword,
 │   │                             changePassword
+│   ├── avatar.service.ts       ← getUploadUrl (presigned PUT), confirmAvatar (HEAD + DB)
 │   ├── email.service.ts        ← sendVerificationEmail, sendResetCodeEmail,
 │   │                             sendPasswordChangedEmail (AWS SES v2)
 │   └── evento.service.ts       ← queries com filtros, paginação, busca
@@ -887,7 +1015,7 @@ src/
 │   ├── mongodb.connection.ts   ← conexão singleton (reutilizada entre invocações Lambda)
 │   └── repositories/
 │       ├── user.repository.ts  ← findByEmail, findById, insertUser, deleteById,
-│       │                         markEmailVerified, updatePassword
+│       │                         markEmailVerified, updatePassword, updateAvatarUrl
 │       ├── emailVerification.repository.ts ← create, findByToken, deleteByUserId,
 │       │                                       deleteByToken, findLatestByUserId (+ TTL index)
 │       ├── passwordResetCode.repository.ts ← create, findByUserAndCode, deleteByUserId,
@@ -896,9 +1024,11 @@ src/
 │       │                                       (+ TTL index, unique no token)
 │       └── evento.repository.ts ← findEventos, findEventoById, getDistinctMunicipios
 ├── types/
-│   ├── user.types.ts           ← User, UserInsert, UserPublic (inclui emailVerified)
+│   ├── user.types.ts           ← User (inclui avatarUrl?), UserInsert, UserPublic
 │   ├── emailVerification.types.ts ← EmailVerificationToken, EmailVerificationTokenInsert
 │   ├── passwordReset.types.ts  ← PasswordResetCode, PasswordResetToken (+ Insert)
+│   ├── avatar.types.ts         ← AvatarMimeType + constantes (AVATAR_MAX_SIZE_BYTES,
+│   │                              AVATAR_ACCEPTED_MIME_TYPES) + Body/Response shapes
 │   ├── evento.types.ts         ← Evento, Categoria, CATEGORIAS_VALIDAS
 │   └── auth.types.ts           ← LoginBody, RegisterBody, ResendVerificationBody,
 │                                  VerifyEmailQuery, JwtPayload, VerifyEmailResult,
@@ -909,6 +1039,7 @@ src/
 │   │                             forgotPassword, verifyResetCode, resetPassword,
 │   │                             changePassword
 │   │                             (verify-email NÃO usa schema — handler retorna HTML)
+│   ├── user.schemas.ts         ← JSON Schema: avatarUploadUrl, avatarConfirm
 │   └── evento.schemas.ts       ← JSON Schema para query params de listagem
 └── utils/
     ├── jwt.utils.ts            ← signToken, verifyToken, extractTokenFromHeader
@@ -941,7 +1072,7 @@ src/
 - `code` casa com `^[A-Z][A-Z0-9_]*$` (UPPER_SNAKE_CASE do nosso domínio)
 - `code` não começa com `FST_` (Fastify) nem `ERR_` (Node)
 
-Códigos ativos: `EMAIL_NOT_VERIFIED`, `USER_NOT_FOUND`, `INVALID_RESET_CODE`, `INVALID_RESET_TOKEN`, `WEAK_PASSWORD`, `INVALID_CURRENT_PASSWORD`.
+Códigos ativos: `EMAIL_NOT_VERIFIED`, `USER_NOT_FOUND`, `INVALID_RESET_CODE`, `INVALID_RESET_TOKEN`, `WEAK_PASSWORD`, `INVALID_CURRENT_PASSWORD`, `AVATAR_INVALID_TYPE`, `AVATAR_TOO_LARGE`, `AVATAR_NOT_UPLOADED`.
 
 ---
 
@@ -987,6 +1118,13 @@ Os parâmetros do deploy (`MongoDbUri`, `MongoDbName`, `JwtSecret`, `JwtExpiresI
 2. Verificar também cada email destinatário de teste (sandbox só envia para identidades verificadas).
 3. A Lambda já tem permissão IAM para `ses:SendEmail` / `ses:SendRawEmail` via `Policies` no `template.yaml`.
 4. Após o primeiro deploy, pegar a `ApiUrl` do output e colocar em `AppBaseUrl` (re-deploy).
+
+**Pré-requisitos do S3 (bucket de avatares):**
+
+1. O nome do bucket é parametrizável (`S3AvatarsBucket`, default `role-sc-avatars`). Como nomes de bucket são globais na AWS, se já estiver em uso, escolher outro via `samconfig.toml`.
+2. O bucket é criado pelo próprio SAM stack (resource `RoleScAvatarsBucket`). Nada manual antes do deploy.
+3. As permissões IAM (`s3:PutObject`, `s3:GetObject`, `s3:DeleteObject` em `avatars/*`) já estão configuradas no `Policies` da Lambda.
+4. Variáveis `S3AvatarsBucket` e `S3AvatarsRegion` ficam salvas em `samconfig.toml` após o `--guided`.
 
 ---
 

@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import { authRoutes } from './routes/auth.routes.js';
 import { eventoRoutes } from './routes/evento.routes.js';
 import { metadataRoutes } from './routes/metadata.routes.js';
+import { userRoutes } from './routes/user.routes.js';
 
 export function buildApp() {
   const app = Fastify({ logger: true });
@@ -10,6 +11,7 @@ export function buildApp() {
   app.register(cors);
   app.register(authRoutes, { prefix: '/auth' });
   app.register(eventoRoutes, { prefix: '/eventos' });
+  app.register(userRoutes, { prefix: '/users' });
   app.register(metadataRoutes);
 
   app.setErrorHandler((error: Error & { statusCode?: number; code?: string; validation?: unknown }, _request, reply) => {

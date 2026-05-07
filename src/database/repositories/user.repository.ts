@@ -53,3 +53,11 @@ export async function updatePassword(
   const col = await getCollection();
   await col.updateOne({ _id: id }, { $set: { senha: hashedPassword } });
 }
+
+export async function updateAvatarUrl(
+  id: ObjectId,
+  avatarUrl: string,
+): Promise<void> {
+  const col = await getCollection();
+  await col.updateOne({ _id: id }, { $set: { avatarUrl } });
+}
