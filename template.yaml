@@ -154,7 +154,7 @@ Resources:
       Cors:
         AllowOrigin: "'*'"
         AllowHeaders: "'Authorization, Content-Type, x-api-key'"
-        AllowMethods: "'GET, POST, OPTIONS'"
+        AllowMethods: "'GET, POST, PATCH, OPTIONS'"
       Auth:
         ApiKeyRequired: true
 

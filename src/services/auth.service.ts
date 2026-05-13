@@ -9,12 +9,13 @@ import * as emailService from './email.service.js';
 import { signToken } from '../utils/jwt.utils.js';
 import { createLogger } from '../utils/logger.utils.js';
 import { isStrongPassword } from '../utils/passwordValidator.js';
+import { toPublicUser } from '../utils/userMappers.js';
 import type {
   RegisterBody,
   LoginBody,
   VerifyEmailResult,
 } from '../types/auth.types.js';
-import type { User, UserPublic } from '../types/user.types.js';
+import type { UserPublic } from '../types/user.types.js';
 
 const logger = createLogger('AuthService');
 
@@ -24,19 +25,6 @@ const RESEND_COOLDOWN_MS = 60 * 1000; // 60s
 const RESET_CODE_TTL_MS = 15 * 60 * 1000; // 15min
 const RESET_TOKEN_TTL_MS = 15 * 60 * 1000; // 15min
 const RESET_CODE_RESEND_COOLDOWN_MS = 60 * 1000; // 60s
-
-function toPublicUser(user: User): UserPublic {
-  return {
-    _id: user._id!.toString(),
-    nome: user.nome,
-    email: user.email,
-    emailVerified: user.emailVerified === true,
-    // Só inclui avatarUrl no payload se o user já fez upload — caso contrário
-    // o campo é omitido e o frontend renderiza fallback.
-    ...(user.avatarUrl ? { avatarUrl: user.avatarUrl } : {}),
-    createdAt: user.createdAt,
-  };
-}
 
 function generateToken(): string {
   return randomBytes(32).toString('hex');

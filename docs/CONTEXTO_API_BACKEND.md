@@ -691,6 +691,66 @@ Altera a senha do usuário logado. Diferente do `/auth/reset-password` (prova = 
 
 > **JWTs antigos continuam válidos.** Mesma decisão pragmática do `reset-password` — implementar `tokenVersion` é follow-up.
 
+#### `PATCH /users/me`
+
+Atualiza dados parciais do perfil do usuário logado. **Autenticado (JWT).**
+
+Por enquanto **só altera `nome`** (decisão de produto — ver `CONTRATO_EDITAR_PERFIL.md` §1). Email não é editável aqui (exigiria novo fluxo de verificação), senha tem fluxo próprio (`/auth/change-password`), avatar tem fluxo próprio (`/users/me/avatar/*`).
+
+**Request body:**
+```json
+{
+  "nome": "Gabriel Prates"
+}
+```
+
+**Validações:**
+- `nome`: string, obrigatória, 2–80 caracteres (validado em chars brutos pelo JSON Schema e novamente após `.trim()` no service — defesa em profundidade contra `"   "` que passaria pelo `minLength: 2` mas vira `""` após trim)
+- `additionalProperties: false` no body — qualquer campo extra (ex.: `email`, `senha`) é rejeitado com 400. Isso é **intencional**: deixa explícito que esses campos não são editáveis aqui.
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "user": {
+    "_id": "664a1b2c3d4e5f6a7b8c9d0e",
+    "nome": "Gabriel Prates",
+    "email": "gabriel@email.com",
+    "emailVerified": true,
+    "avatarUrl": "https://...?v=...",
+    "createdAt": "2026-04-14T12:00:00.000Z"
+  }
+}
+```
+
+Retorna o user atualizado completo (mesmo shape do `GET /auth/me`). Frontend usa essa resposta pra atualizar o `AuthContext` sem refazer `getMe`.
+
+**Response 400 (validação JSON Schema):**
+```json
+{
+  "success": false,
+  "message": "body/nome must NOT have fewer than 2 characters"
+}
+```
+
+**Response 400 (validação após trim no service):**
+
+Mesmo shape; lançada quando o `nome` passa pelo schema mas fica inválido após `.trim()`. Mensagens idênticas às do schema pra UX consistente no frontend.
+
+**Response 401:**
+```json
+{ "success": false, "message": "Token inválido ou ausente." }
+```
+
+**Lógica interna:**
+1. `authHook` extrai `userId` do JWT
+2. JSON Schema valida shape do body (`additionalProperties: false`)
+3. Service faz `nome.trim()` e revalida 2–80 chars
+4. `users.nome` atualizado
+5. Re-fetch do user e retorno via `toPublicUser` (centralizado em `utils/userMappers.ts`)
+
+> **Não há `code` específico nesse endpoint.** Erros de validação são 400 com mensagem padrão do Fastify — o frontend já lida com isso via `extractErrorMessage` genérico.
+
 #### `POST /users/me/avatar/upload-url`
 
 Gera uma presigned URL pra o frontend fazer PUT direto no S3, sem passar pela Lambda. **Autenticado (JWT).**
@@ -999,12 +1059,14 @@ src/
 │   │                             POST /auth/forgot-password, POST /auth/verify-reset-code,
 │   │                             POST /auth/reset-password, POST /auth/change-password
 │   ├── evento.routes.ts        ← GET /eventos, GET /eventos/:id
-│   ├── user.routes.ts          ← POST /users/me/avatar/upload-url, POST /users/me/avatar/confirm
+│   ├── user.routes.ts          ← PATCH /users/me,
+│   │                             POST /users/me/avatar/upload-url, POST /users/me/avatar/confirm
 │   └── metadata.routes.ts      ← GET /municipios, GET /categorias
 ├── services/
 │   ├── auth.service.ts         ← register, login, verifyEmail, resendVerification, getMe,
 │   │                             forgotPassword, verifyResetCode, resetPassword,
 │   │                             changePassword
+│   ├── user.service.ts         ← updateProfile (PATCH /users/me — só `nome` por enquanto)
 │   ├── avatar.service.ts       ← getUploadUrl (presigned PUT), confirmAvatar (HEAD + DB)
 │   ├── email.service.ts        ← sendVerificationEmail, sendResetCodeEmail,
 │   │                             sendPasswordChangedEmail (AWS SES v2)
@@ -1015,7 +1077,7 @@ src/
 │   ├── mongodb.connection.ts   ← conexão singleton (reutilizada entre invocações Lambda)
 │   └── repositories/
 │       ├── user.repository.ts  ← findByEmail, findById, insertUser, deleteById,
-│       │                         markEmailVerified, updatePassword, updateAvatarUrl
+│       │                         markEmailVerified, updatePassword, updateAvatarUrl, updateNome
 │       ├── emailVerification.repository.ts ← create, findByToken, deleteByUserId,
 │       │                                       deleteByToken, findLatestByUserId (+ TTL index)
 │       ├── passwordResetCode.repository.ts ← create, findByUserAndCode, deleteByUserId,
@@ -1033,18 +1095,20 @@ src/
 │   └── auth.types.ts           ← LoginBody, RegisterBody, ResendVerificationBody,
 │                                  VerifyEmailQuery, JwtPayload, VerifyEmailResult,
 │                                  ForgotPasswordBody, VerifyResetCodeBody, ResetPasswordBody,
-│                                  ChangePasswordBody
+│                                  ChangePasswordBody, UpdateProfileBody
 ├── schemas/
 │   ├── auth.schemas.ts         ← JSON Schema: register, login, resendVerification,
 │   │                             forgotPassword, verifyResetCode, resetPassword,
 │   │                             changePassword
 │   │                             (verify-email NÃO usa schema — handler retorna HTML)
-│   ├── user.schemas.ts         ← JSON Schema: avatarUploadUrl, avatarConfirm
+│   ├── user.schemas.ts         ← JSON Schema: avatarUploadUrl, avatarConfirm, updateProfile
 │   └── evento.schemas.ts       ← JSON Schema para query params de listagem
 └── utils/
     ├── jwt.utils.ts            ← signToken, verifyToken, extractTokenFromHeader
     ├── emailVerifyPages.ts     ← renderSuccessPage, renderErrorPage, escapeHtml
     ├── passwordValidator.ts    ← isStrongPassword (regex em sincronia com o frontend)
+    ├── userMappers.ts          ← toPublicUser (User → UserPublic, omite senha,
+    │                             omite avatarUrl undefined, normaliza emailVerified)
     └── logger.utils.ts         ← createLogger (mesmo padrão do NLP)
 ```
 

@@ -61,3 +61,8 @@ export async function updateAvatarUrl(
   const col = await getCollection();
   await col.updateOne({ _id: id }, { $set: { avatarUrl } });
 }
+
+export async function updateNome(id: ObjectId, nome: string): Promise<void> {
+  const col = await getCollection();
+  await col.updateOne({ _id: id }, { $set: { nome } });
+}

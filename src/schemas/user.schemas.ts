@@ -54,6 +54,27 @@ export const avatarConfirmSchema = {
   },
 } as const;
 
+// PATCH /users/me — atualização parcial de perfil.
+//
+// `additionalProperties: false` é INTENCIONAL: o contrato proíbe mudanças
+// silenciosas de campos como `email` (exige re-verificação) ou `senha`
+// (fluxo próprio). Rejeitar com 400 deixa explícito que o cliente está
+// tentando algo não suportado, em vez de aceitar e descartar.
+//
+// `minLength: 2` aqui é apenas o piso de chars BRUTOS — o service valida
+// novamente após trim (string "   " passa por este schema com 3 chars
+// mas vira "" depois do trim).
+export const updateProfileSchema = {
+  body: {
+    type: 'object',
+    required: ['nome'],
+    properties: {
+      nome: { type: 'string', minLength: 2, maxLength: 80 },
+    },
+    additionalProperties: false,
+  },
+} as const;
+
 // Re-exports só pra documentação — quem importa os limites usa direto do
 // types/avatar.types.ts. Mantidos aqui pra evitar warnings de unused import.
 export { AVATAR_ACCEPTED_MIME_TYPES, AVATAR_MAX_SIZE_BYTES };

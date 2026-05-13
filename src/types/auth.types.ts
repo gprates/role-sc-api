@@ -37,6 +37,10 @@ export interface ChangePasswordBody {
   novaSenha: string;
 }
 
+export interface UpdateProfileBody {
+  nome: string;
+}
+
 export interface JwtPayload {
   userId: string;
   email: string;
