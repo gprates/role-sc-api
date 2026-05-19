@@ -1,6 +1,7 @@
 import { randomBytes, randomInt } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { ObjectId } from 'mongodb';
+import { OAuth2Client } from 'google-auth-library';
 import * as userRepo from '../database/repositories/user.repository.js';
 import * as verificationRepo from '../database/repositories/emailVerification.repository.js';
 import * as resetCodeRepo from '../database/repositories/passwordResetCode.repository.js';
@@ -101,6 +102,20 @@ export async function login(
   if (!user) {
     const error = new Error('Email ou senha inválidos') as Error & { statusCode: number };
     error.statusCode = 401;
+    throw error;
+  }
+
+  // Conta criada via Google Sign-In nunca teve senha cadastrada. Aqui sim
+  // diferenciamos o erro (sem antienumeration) — a UX sem isso seria inviável:
+  // o usuário ficaria preso achando que a senha está errada. Trade-off
+  // consciente, coerente com a decisão de "não somos um banco" em
+  // CONTRATO_RECUPERACAO_SENHA.md.
+  if (!user.senha) {
+    const error = new Error(
+      'Essa conta foi criada com Google. Entre com o Google.',
+    ) as Error & { statusCode: number; code: string };
+    error.statusCode = 400;
+    error.code = 'PASSWORD_NOT_SET';
     throw error;
   }
 
@@ -485,6 +500,14 @@ export async function changePassword(
     throw error;
   }
 
+  // User criado via Google nunca cadastrou senha — não tem como "alterar a
+  // atual". Retornamos o mesmo INVALID_CURRENT_PASSWORD (em vez de
+  // PASSWORD_NOT_SET) por consistência: a operação "trocar a senha atual"
+  // simplesmente não se aplica aqui, e o frontend já trata esse code.
+  if (!user.senha) {
+    throw makeInvalidCurrentPasswordError();
+  }
+
   const isCurrentValid = await bcrypt.compare(senhaAtual, user.senha);
   if (!isCurrentValid) {
     throw makeInvalidCurrentPasswordError();
@@ -519,5 +542,298 @@ export async function changePassword(
   return {
     success: true,
     message: 'Senha alterada com sucesso.',
+  };
+}
+
+// ============================================================================
+// Login com Google (OAuth2 / OIDC)
+// ============================================================================
+//
+// Fluxo (CONTRATO_LOGIN_GOOGLE.md §4.3 e §5.1):
+//   1. O app abre o browser do sistema, completa o OAuth com a Google e recebe
+//      um `id_token` (JWT assinado pela Google) — tudo isso no frontend.
+//   2. App manda o `idToken` pra cá.
+//   3. Backend valida criptograficamente: assinatura, audience, expiração.
+//      Tudo via `google-auth-library` — NUNCA decodificar manualmente sem
+//      `verifyIdToken`, porque atacante pode forjar payload arbitrário.
+//   4. Aplica a lógica de linking: busca por googleId → busca por email →
+//      cria novo user. Retorna nosso JWT, idêntico ao do login normal.
+//
+// Princípios de segurança:
+//   - `audience` SEMPRE validado contra `GOOGLE_ANDROID_CLIENT_ID` do .env.
+//     Se um dia suportar Expo Go (Web Client), passar array.
+//   - `email_verified !== true` no id_token → recusa. Sem isso, alguém
+//     poderia adicionar um email arbitrário num projeto Google qualquer.
+//   - Linking automático só quando `email` bate E `email_verified=true`.
+//   - Avatar URL do Google é confiável e estável (lh3.googleusercontent.com);
+//     não fazemos cópia pro S3.
+
+const googleClient = new OAuth2Client();
+
+function makeInvalidGoogleTokenError(): Error & { statusCode: number; code: string } {
+  const error = new Error(
+    'Não foi possível verificar suas credenciais Google.',
+  ) as Error & { statusCode: number; code: string };
+  error.statusCode = 400;
+  error.code = 'INVALID_GOOGLE_TOKEN';
+  return error;
+}
+
+function makeGoogleEmailNotVerifiedError(): Error & { statusCode: number; code: string } {
+  const error = new Error(
+    'Verifique seu email no Google antes de continuar.',
+  ) as Error & { statusCode: number; code: string };
+  error.statusCode = 400;
+  error.code = 'GOOGLE_EMAIL_NOT_VERIFIED';
+  return error;
+}
+
+interface GoogleIdTokenPayload {
+  sub: string;
+  email: string;
+  email_verified: boolean;
+  name: string;
+  picture?: string;
+}
+
+// Mostra os primeiros e últimos N chars de uma string sensível pra usar em
+// logs (CloudWatch). NUNCA logar o idToken inteiro — ele é um JWT assinado
+// que dá acesso à conta do user até expirar.
+function redact(value: string | undefined, keep = 8): string {
+  if (!value) return '<empty>';
+  if (value.length <= keep * 2) return `${value.length}chars`;
+  return `${value.slice(0, keep)}...${value.slice(-keep)} (len=${value.length})`;
+}
+
+// Decodifica o payload de um JWT SEM validar assinatura. Uso EXCLUSIVO para
+// log de diagnóstico — nunca confiar no resultado para decisões de auth.
+// Retorna `null` se o token não tiver o formato `header.payload.signature`.
+function decodeJwtPayloadUnsafe(idToken: string): Record<string, unknown> | null {
+  try {
+    const parts = idToken.split('.');
+    if (parts.length !== 3) return null;
+    const payloadB64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = payloadB64 + '='.repeat((4 - (payloadB64.length % 4)) % 4);
+    const json = Buffer.from(padded, 'base64').toString('utf8');
+    const parsed = JSON.parse(json);
+    return typeof parsed === 'object' && parsed !== null ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function verifyGoogleIdToken(idToken: string): Promise<GoogleIdTokenPayload> {
+  // Suportamos múltiplos audiences porque o `client_id` do id_token muda
+  // conforme o caminho do OAuth no frontend:
+  //   - APK próprio (prod, scheme rolesc://)  → audience = ANDROID Client ID
+  //   - Expo Go (dev, via auth.expo.io proxy) → audience = WEB Client ID
+  // A `google-auth-library` aceita um array em `audience` e valida que o
+  // `aud` do token bate com QUALQUER um dos valores.
+  const audiences = [
+    process.env.GOOGLE_ANDROID_CLIENT_ID,
+    process.env.GOOGLE_WEB_CLIENT_ID,
+  ].filter((v): v is string => Boolean(v));
+
+  if (audiences.length === 0) {
+    // Erro de configuração — NÃO é culpa do user. Loga e devolve 500 genérico
+    // pelo error handler global, sem expor a falta das env vars.
+    logger.error(
+      JSON.stringify({
+        event: 'google_login.config_missing',
+        msg: 'Nem GOOGLE_ANDROID_CLIENT_ID nem GOOGLE_WEB_CLIENT_ID estão configurados',
+      }),
+    );
+    throw new Error('Google Sign-In não está configurado neste servidor.');
+  }
+
+  // Diagnóstico: decodifica o payload SEM validar pra mostrar `aud`/`iss`/`exp`
+  // logo de cara. Útil pra ver "ah, veio com aud=X mas eu esperava [Y,Z]" sem
+  // precisar capturar o token e debugar à mão. O `verifyIdToken` abaixo continua
+  // sendo a fonte da verdade — esse decode é só log.
+  const unsafePayload = decodeJwtPayloadUnsafe(idToken);
+  const aud = unsafePayload?.aud;
+  const iss = unsafePayload?.iss;
+  const exp = typeof unsafePayload?.exp === 'number' ? unsafePayload.exp : null;
+  const azp = unsafePayload?.azp;
+
+  let ticket;
+  try {
+    ticket = await googleClient.verifyIdToken({
+      idToken,
+      audience: audiences,
+    });
+  } catch (err) {
+    // Loga TUDO que ajuda a diagnosticar:
+    //   - mensagem do erro do google-auth-library (geralmente diz exatamente
+    //     o que falhou: "Wrong recipient", "Token used too late", "Invalid
+    //     token signature", etc)
+    //   - audiences que ESTÁVAMOS esperando
+    //   - `aud`/`iss`/`exp`/`azp` que VIERAM no token (decodificados sem
+    //     validar — só pra log)
+    //   - now atual em segundos, pra comparar com `exp`
+    //   - prefixo redigido do idToken pra correlacionar requests
+    logger.warn(
+      JSON.stringify({
+        event: 'google_login.verify_failed',
+        error: err instanceof Error ? err.message : String(err),
+        errorName: err instanceof Error ? err.name : undefined,
+        expectedAudiences: audiences,
+        tokenAud: aud,
+        tokenIss: iss,
+        tokenExp: exp,
+        tokenAzp: azp,
+        nowSec: Math.floor(Date.now() / 1000),
+        expiresInSec: exp ? exp - Math.floor(Date.now() / 1000) : null,
+        idTokenPreview: redact(idToken),
+      }),
+    );
+    throw makeInvalidGoogleTokenError();
+  }
+
+  const payload = ticket.getPayload();
+  if (!payload) {
+    logger.warn(
+      JSON.stringify({
+        event: 'google_login.empty_payload',
+        msg: 'verifyIdToken passou mas getPayload retornou null',
+        idTokenPreview: redact(idToken),
+      }),
+    );
+    throw makeInvalidGoogleTokenError();
+  }
+
+  // Campos obrigatórios pro fluxo. `email` e `sub` SEMPRE vêm quando se pede
+  // os escopos `openid email profile`. Defensivo mesmo assim.
+  if (!payload.sub || !payload.email || !payload.name) {
+    logger.warn(
+      JSON.stringify({
+        event: 'google_login.missing_fields',
+        msg: 'id_token do Google sem campos obrigatórios (sub/email/name)',
+        hasSub: Boolean(payload.sub),
+        hasEmail: Boolean(payload.email),
+        hasName: Boolean(payload.name),
+        audUsed: payload.aud,
+      }),
+    );
+    throw makeInvalidGoogleTokenError();
+  }
+
+  return {
+    sub: payload.sub,
+    email: payload.email,
+    email_verified: payload.email_verified === true,
+    name: payload.name,
+    picture: payload.picture,
+  };
+}
+
+export async function googleLogin(
+  idToken: string,
+): Promise<{
+  success: true;
+  token: string;
+  user: UserPublic;
+  isNewUser: boolean;
+}> {
+  const payload = await verifyGoogleIdToken(idToken);
+
+  // Linking automático SÓ quando o Google garante que o email é do user.
+  // Sem essa checagem, um atacante poderia criar um projeto Google com
+  // email arbitrário (não verificado) e tomar contas alheias do nosso banco.
+  if (!payload.email_verified) {
+    logger.warn(
+      JSON.stringify({
+        event: 'google_login.email_not_verified',
+        email: payload.email,
+        sub: payload.sub,
+      }),
+    );
+    throw makeGoogleEmailNotVerifiedError();
+  }
+
+  logger.info(
+    JSON.stringify({
+      event: 'google_login.verify_ok',
+      sub: payload.sub,
+      email: payload.email,
+    }),
+  );
+
+  // 1) Já existe user com esse googleId? Login direto — caminho mais comum
+  //    em logins recorrentes.
+  const byGoogle = await userRepo.findByGoogleId(payload.sub);
+  if (byGoogle) {
+    const token = signToken({
+      userId: byGoogle._id!.toString(),
+      email: byGoogle.email,
+    });
+    return {
+      success: true,
+      token,
+      user: toPublicUser(byGoogle),
+      isNewUser: false,
+    };
+  }
+
+  // 2) Existe user com o MESMO email mas sem googleId? Linking automático.
+  //    Seguro porque o Google já confirmou que esse email é do dono da conta.
+  const byEmail = await userRepo.findByEmail(payload.email);
+  if (byEmail) {
+    await userRepo.linkGoogleAccount(byEmail._id!, {
+      googleId: payload.sub,
+      // Se ainda não estava verificado, agora está — Google validou. Evita
+      // travar o login num usuário que se cadastrou e nunca clicou no link.
+      markEmailVerified: byEmail.emailVerified !== true,
+      // Avatar só preenche se o user ainda não tem (não pisa em avatar custom).
+      avatarUrlIfMissing: payload.picture,
+    });
+
+    // Re-fetch pra refletir os campos atualizados na resposta.
+    const refreshed = await userRepo.findById(byEmail._id!.toString());
+    const user = refreshed ?? byEmail;
+    const token = signToken({
+      userId: user._id!.toString(),
+      email: user.email,
+    });
+    return {
+      success: true,
+      token,
+      user: toPublicUser(user),
+      isNewUser: false,
+    };
+  }
+
+  // 3) Não existe: criar um user novo. Note que `senha` fica undefined —
+  //    user vai logar via Google daqui pra frente. Adicionar senha é
+  //    follow-up (CONTRATO_LOGIN_GOOGLE.md §11).
+  const now = new Date();
+  const userId = await userRepo.insertUser({
+    nome: payload.name,
+    email: payload.email,
+    // emailVerified: true porque Google já validou — pula o fluxo de SES.
+    emailVerified: true,
+    googleId: payload.sub,
+    googleLinkedAt: now,
+    avatarUrl: payload.picture,
+    createdAt: now,
+  });
+
+  const created = await userRepo.findById(userId.toString());
+  if (!created) {
+    // Caso bizarro — o insert acabou de rodar, fail-fast.
+    logger.error('User criado via Google sumiu antes do re-fetch');
+    throw new Error('Erro ao criar conta.');
+  }
+
+  const token = signToken({
+    userId: created._id!.toString(),
+    email: created.email,
+  });
+
+  return {
+    success: true,
+    token,
+    user: toPublicUser(created),
+    isNewUser: true,
   };
 }

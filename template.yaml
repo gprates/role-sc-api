@@ -37,6 +37,16 @@ Parameters:
     Type: String
     Description: Região do bucket S3 de avatares (mesma da Lambda recomendada)
     Default: sa-east-1
+  GoogleAndroidClientId:
+    Type: String
+    Description: OAuth Android Client ID do Google Cloud Console (mesmo valor que EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID do frontend). Usado como audience na validação do id_token em POST /auth/google quando o app vem de um APK próprio.
+    Default: ''
+    NoEcho: true
+  GoogleWebClientId:
+    Type: String
+    Description: OAuth Web Client ID do Google Cloud Console (mesmo valor que EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID do frontend). Usado como audience na validação do id_token em POST /auth/google quando o app vem do Expo Go (proxy auth.expo.io).
+    Default: ''
+    NoEcho: true
 
 Globals:
   Function:
@@ -75,6 +85,8 @@ Resources:
           APP_BASE_URL: !Ref AppBaseUrl
           S3_AVATARS_BUCKET: !Ref S3AvatarsBucket
           S3_AVATARS_REGION: !Ref S3AvatarsRegion
+          GOOGLE_ANDROID_CLIENT_ID: !Ref GoogleAndroidClientId
+          GOOGLE_WEB_CLIENT_ID: !Ref GoogleWebClientId
       Policies:
         - Version: '2012-10-17'
           Statement:

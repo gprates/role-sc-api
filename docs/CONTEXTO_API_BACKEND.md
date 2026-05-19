@@ -44,8 +44,9 @@ Sites municipais → Lambda Crawler → MongoDB (raw_crawls)
 4. Permite **recuperação de senha** por código de 6 dígitos enviado por email
 5. Permite **alteração de senha** por usuário logado (exige senha atual)
 6. Permite **upload de avatar** via presigned URL no S3 (cliente envia direto pro bucket)
-7. Protege rotas com verificação de token JWT + `emailVerified`
-8. Fornece metadados auxiliares (lista de municípios e categorias)
+7. Permite **login/cadastro via Google** validando o `id_token` com `google-auth-library`
+8. Protege rotas com verificação de token JWT + `emailVerified`
+9. Fornece metadados auxiliares (lista de municípios e categorias)
 
 A API é **somente leitura** em relação a eventos — ela consulta a coleção `eventos` populada pelo NLP Processor. A escrita ocorre em `users` (cadastro/verificação/troca de senha), `emailVerificationTokens`, `passwordResetCodes` e `passwordResetTokens` (todas com TTL).
 
@@ -64,6 +65,7 @@ A API é **somente leitura** em relação a eventos — ela consulta a coleção
 | mongodb | ^7.1 | Cliente MongoDB |
 | bcryptjs | ^3.0 | Hash de senhas (puro JS, sem binários nativos) |
 | jsonwebtoken | ^9.0 | JWT |
+| google-auth-library | ^10.6 | Validação criptográfica do `id_token` do Google em `/auth/google` |
 | @aws-sdk/client-sesv2 | ^3.1036 | Envio de email de verificação (AWS SES v2) |
 | @aws-sdk/client-s3 | ^3.1043 | Operações no bucket de avatares (HEAD/GET/PUT/DELETE) |
 | @aws-sdk/s3-request-presigner | ^3.1043 | Presigned PUT URLs para upload direto do cliente |
@@ -112,6 +114,8 @@ A API é **somente leitura** em relação a eventos — ela consulta a coleção
 | `APP_BASE_URL` | Base URL pública da API, usada para montar o link no email (sem barra final) |
 | `S3_AVATARS_BUCKET` | Nome do bucket S3 de avatares (`role-sc-avatars`) |
 | `S3_AVATARS_REGION` | Região do bucket S3 (`sa-east-1`) |
+| `GOOGLE_ANDROID_CLIENT_ID` | OAuth **Android** Client ID do Google Console (mesmo valor que `EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID` do frontend). Audience esperado quando o app vem de um APK próprio (prod, scheme `rolesc://`). Opcional — deixar em branco se não usa APK próprio. |
+| `GOOGLE_WEB_CLIENT_ID` | OAuth **Web** Client ID do Google Console (mesmo valor que `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID` do frontend). Audience esperado quando o app vem do Expo Go (dev, via proxy `auth.expo.io`). Opcional — deixar em branco se não usa Expo Go. **Pelo menos um dos dois (Android ou Web) precisa estar definido** para `POST /auth/google` funcionar. |
 
 ### Segurança do API Gateway
 
@@ -192,15 +196,20 @@ interface User {
   _id?: ObjectId;
   nome: string;
   email: string;           // índice único
-  senha: string;           // hash bcrypt (nunca retornar em responses)
-  emailVerified: boolean;  // false no cadastro, true após clicar no link do email
-  avatarUrl?: string;      // URL pública S3 com cache busting (?v=). undefined = sem upload
+  // Senha é OPCIONAL: users criados via Google Sign-In NÃO têm senha.
+  // Sempre validar `if (!user.senha)` antes de chamar bcrypt.compare.
+  senha?: string;          // hash bcrypt (nunca retornar em responses)
+  emailVerified: boolean;  // false no cadastro, true após clicar no link do email OU true automaticamente se veio do Google
+  avatarUrl?: string;      // URL pública S3 com cache busting (?v=). undefined = sem upload. Em users-Google, pode vir como URL direto do lh3.googleusercontent.com.
+  googleId?: string;       // `sub` do id_token do Google. Presente em qualquer user que tenha logado/linkado via Google.
+  googleLinkedAt?: Date;   // timestamp do linking com Google (auditoria/debug)
   createdAt: Date;
 }
 ```
 
 **Índices (criados automaticamente pela API na inicialização):**
 - `{ email: 1 }` — único
+- `{ googleId: 1 }` — **sparse** (a maioria dos users não tem `googleId`, são users de email/senha)
 
 ### Coleção `emailVerificationTokens` (escrita)
 
@@ -400,6 +409,17 @@ Autentica e retorna JWT. **Exige `emailVerified: true` no usuário.**
 
 > O campo `code` é **obrigatório** nesse caso — o frontend usa pra detectar esse 403 específico e redirecionar pra tela de verificação.
 
+**Response 400 (conta criada via Google, sem senha cadastrada):**
+```json
+{
+  "success": false,
+  "code": "PASSWORD_NOT_SET",
+  "message": "Essa conta foi criada com Google. Entre com o Google."
+}
+```
+
+> Esse code só dispara quando o user EXISTE mas tem `senha === undefined` (cadastrou-se via Google e nunca definiu senha). Diferenciamos do 401 INVALID_CREDENTIALS para que a UX seja viável — sem isso, o usuário ficaria preso achando que a senha está errada. Trade-off de antienumeration aceitável (coerente com a decisão em `CONTRATO_RECUPERACAO_SENHA.md`).
+
 #### `POST /auth/resend-verification`
 
 Reenvia o email de verificação. **Público (sem JWT).** Rate-limited em 1 reenvio por email a cada 60s.
@@ -431,6 +451,67 @@ Endpoint **público** (sem `x-api-key`, sem JWT). Aberto pelo browser a partir d
 - **400** (token ausente/inválido/expirado): página HTML de erro com instrução pra solicitar novo link.
 
 Além do TTL do Mongo, a rota valida `expiresAt > now` explicitamente.
+
+#### `POST /auth/google`
+
+Troca um `id_token` do Google por um JWT nosso. **Público (sem JWT).** Cria a conta automaticamente na primeira vez OU linka com conta existente quando o email bate. Contrato completo: `CONTRATO_LOGIN_GOOGLE.md`.
+
+**Request body:**
+```json
+{
+  "idToken": "eyJhbGciOiJSUzI1NiIs..."
+}
+```
+
+**Validações:**
+- `idToken`: string, obrigatória. A validação criptográfica real (assinatura, audience, expiração) é feita no service via `google-auth-library.verifyIdToken`.
+
+**Lógica de linking (`src/services/auth.service.ts → googleLogin`):**
+1. `OAuth2Client.verifyIdToken({ idToken, audience: [GOOGLE_ANDROID_CLIENT_ID, GOOGLE_WEB_CLIENT_ID].filter(Boolean) })` — falha aqui → 400 `INVALID_GOOGLE_TOKEN`. A lib aceita array de audiences e valida que o `aud` do token bate com QUALQUER um dos clients configurados (suporta APK próprio + Expo Go ao mesmo tempo).
+2. Se `payload.email_verified !== true` → 400 `GOOGLE_EMAIL_NOT_VERIFIED`.
+3. Busca user por `googleId` (igual a `payload.sub`). Achou? Login direto.
+4. Não achou — busca por email. Achou? **Linking automático**: seta `googleId`, `googleLinkedAt = now`, marca `emailVerified = true` (se ainda não estava) e preenche `avatarUrl` com `payload.picture` **apenas se ainda não tinha** (não pisa em avatar custom).
+5. Não achou — cria user novo: `nome = payload.name`, `email = payload.email`, `emailVerified = true`, `googleId = payload.sub`, `avatarUrl = payload.picture`, `senha = undefined`.
+6. Gera nosso JWT (mesma assinatura/payload do `/auth/login`) e retorna.
+
+**Response 200 (login ou criação ok):**
+```json
+{
+  "success": true,
+  "token": "eyJhbGciOiJIUzI1NiIs...",
+  "user": {
+    "_id": "664a...",
+    "nome": "Gabriel Prates",
+    "email": "gabriel@gmail.com",
+    "emailVerified": true,
+    "avatarUrl": "https://lh3.googleusercontent.com/...",
+    "createdAt": "2026-04-14T12:00:00.000Z"
+  },
+  "isNewUser": false
+}
+```
+
+> O frontend usa `isNewUser` para futuras melhorias de UX (ex.: toast "Bem-vindo!" no primeiro login). Hoje o app ignora o flag.
+
+**Response 400 (id_token inválido / expirado / audience errado):**
+```json
+{
+  "success": false,
+  "code": "INVALID_GOOGLE_TOKEN",
+  "message": "Não foi possível verificar suas credenciais Google."
+}
+```
+
+**Response 400 (email não verificado no Google — raro):**
+```json
+{
+  "success": false,
+  "code": "GOOGLE_EMAIL_NOT_VERIFIED",
+  "message": "Verifique seu email no Google antes de continuar."
+}
+```
+
+> 🚨 **Importante**: o backend SEMPRE valida criptograficamente o `id_token` via `google-auth-library`. NÃO confiar em payload decodificado sem `verifyIdToken` — atacante pode forjar JWT com email arbitrário. O `audience` é validado contra a união de `GOOGLE_ANDROID_CLIENT_ID` + `GOOGLE_WEB_CLIENT_ID` (pelo menos um precisa estar definido). Para suportar outros clients (iOS, etc.), basta adicionar a env var e incluir no array em `auth.service.ts → verifyGoogleIdToken`.
 
 #### `POST /auth/forgot-password`
 
@@ -982,6 +1063,8 @@ Retorna a lista fixa de categorias válidas.
 
 4. POST /auth/login
    → Busca user por email
+   → Se user existe mas user.senha === undefined → 400 { code: 'PASSWORD_NOT_SET' }
+     (conta criada via Google sem senha definida)
    → Compara senha com bcrypt.compare()
    → Se user.emailVerified !== true → 403 { code: 'EMAIL_NOT_VERIFIED' }
    → Gera JWT com payload { userId, email }
@@ -1027,6 +1110,8 @@ Retorna a lista fixa de categorias válidas.
    POST /auth/change-password   (preHandler: authHook)
      → Busca user por userId do JWT
      → User não existe → 401 (caso defensivo, força logout no client)
+     → User sem senha cadastrada (conta Google pura) → 400
+       { code: 'INVALID_CURRENT_PASSWORD' } (consistente — a operação não se aplica)
      → bcrypt.compare(senhaAtual, user.senha) — constant-time
        Falhou → 400 { code: 'INVALID_CURRENT_PASSWORD' }
      → Valida força da novaSenha
@@ -1036,6 +1121,23 @@ Retorna a lista fixa de categorias válidas.
      → Hash bcrypt (10 rounds), updatePassword no users
      → Envia email "sua senha foi alterada" (mesmo template do reset, não-bloqueante)
      → Retorna 200
+
+8. Login/cadastro com Google — POST /auth/google (público, sem JWT)
+   → Valida o `idToken` recebido do app com google-auth-library:
+     audiences = [GOOGLE_ANDROID_CLIENT_ID, GOOGLE_WEB_CLIENT_ID].filter(Boolean)
+     OAuth2Client.verifyIdToken({ idToken, audience: audiences })
+     Falhou → 400 { code: 'INVALID_GOOGLE_TOKEN' }
+   → Extrai { sub, email, email_verified, name, picture } do payload
+   → email_verified !== true → 400 { code: 'GOOGLE_EMAIL_NOT_VERIFIED' }
+   → Linking automático (CONTRATO_LOGIN_GOOGLE.md §4.3):
+     a) Acha por googleId → login direto, isNewUser: false
+     b) Acha por email → seta googleId + googleLinkedAt, marca emailVerified=true
+        se ainda não estava, preenche avatarUrl com payload.picture SOMENTE
+        se ainda não existir → isNewUser: false
+     c) Não acha → cria user novo (senha = undefined, emailVerified = true,
+        googleId = sub, avatarUrl = picture) → isNewUser: true
+   → Gera nosso JWT (idêntico ao do /auth/login)
+   → Retorna 200 com { token, user, isNewUser }
 ```
 
 ### Configuração JWT
@@ -1057,7 +1159,8 @@ src/
 │   ├── auth.routes.ts          ← POST /auth/register, POST /auth/login, GET /auth/me,
 │   │                             GET /auth/verify-email (HTML), POST /auth/resend-verification,
 │   │                             POST /auth/forgot-password, POST /auth/verify-reset-code,
-│   │                             POST /auth/reset-password, POST /auth/change-password
+│   │                             POST /auth/reset-password, POST /auth/change-password,
+│   │                             POST /auth/google
 │   ├── evento.routes.ts        ← GET /eventos, GET /eventos/:id
 │   ├── user.routes.ts          ← PATCH /users/me,
 │   │                             POST /users/me/avatar/upload-url, POST /users/me/avatar/confirm
@@ -1065,7 +1168,7 @@ src/
 ├── services/
 │   ├── auth.service.ts         ← register, login, verifyEmail, resendVerification, getMe,
 │   │                             forgotPassword, verifyResetCode, resetPassword,
-│   │                             changePassword
+│   │                             changePassword, googleLogin
 │   ├── user.service.ts         ← updateProfile (PATCH /users/me — só `nome` por enquanto)
 │   ├── avatar.service.ts       ← getUploadUrl (presigned PUT), confirmAvatar (HEAD + DB)
 │   ├── email.service.ts        ← sendVerificationEmail, sendResetCodeEmail,
@@ -1076,8 +1179,9 @@ src/
 ├── database/
 │   ├── mongodb.connection.ts   ← conexão singleton (reutilizada entre invocações Lambda)
 │   └── repositories/
-│       ├── user.repository.ts  ← findByEmail, findById, insertUser, deleteById,
-│       │                         markEmailVerified, updatePassword, updateAvatarUrl, updateNome
+│       ├── user.repository.ts  ← findByEmail, findById, findByGoogleId, insertUser, deleteById,
+│       │                         markEmailVerified, updatePassword, updateAvatarUrl, updateNome,
+│       │                         linkGoogleAccount
 │       ├── emailVerification.repository.ts ← create, findByToken, deleteByUserId,
 │       │                                       deleteByToken, findLatestByUserId (+ TTL index)
 │       ├── passwordResetCode.repository.ts ← create, findByUserAndCode, deleteByUserId,
@@ -1095,11 +1199,11 @@ src/
 │   └── auth.types.ts           ← LoginBody, RegisterBody, ResendVerificationBody,
 │                                  VerifyEmailQuery, JwtPayload, VerifyEmailResult,
 │                                  ForgotPasswordBody, VerifyResetCodeBody, ResetPasswordBody,
-│                                  ChangePasswordBody, UpdateProfileBody
+│                                  ChangePasswordBody, UpdateProfileBody, GoogleLoginBody
 ├── schemas/
 │   ├── auth.schemas.ts         ← JSON Schema: register, login, resendVerification,
 │   │                             forgotPassword, verifyResetCode, resetPassword,
-│   │                             changePassword
+│   │                             changePassword, googleLogin
 │   │                             (verify-email NÃO usa schema — handler retorna HTML)
 │   ├── user.schemas.ts         ← JSON Schema: avatarUploadUrl, avatarConfirm, updateProfile
 │   └── evento.schemas.ts       ← JSON Schema para query params de listagem
@@ -1136,7 +1240,7 @@ src/
 - `code` casa com `^[A-Z][A-Z0-9_]*$` (UPPER_SNAKE_CASE do nosso domínio)
 - `code` não começa com `FST_` (Fastify) nem `ERR_` (Node)
 
-Códigos ativos: `EMAIL_NOT_VERIFIED`, `USER_NOT_FOUND`, `INVALID_RESET_CODE`, `INVALID_RESET_TOKEN`, `WEAK_PASSWORD`, `INVALID_CURRENT_PASSWORD`, `AVATAR_INVALID_TYPE`, `AVATAR_TOO_LARGE`, `AVATAR_NOT_UPLOADED`.
+Códigos ativos: `EMAIL_NOT_VERIFIED`, `USER_NOT_FOUND`, `INVALID_RESET_CODE`, `INVALID_RESET_TOKEN`, `WEAK_PASSWORD`, `INVALID_CURRENT_PASSWORD`, `PASSWORD_NOT_SET`, `INVALID_GOOGLE_TOKEN`, `GOOGLE_EMAIL_NOT_VERIFIED`, `AVATAR_INVALID_TYPE`, `AVATAR_TOO_LARGE`, `AVATAR_NOT_UPLOADED`.
 
 ---
 
@@ -1174,7 +1278,14 @@ sam deploy --guided
 aws apigateway get-api-key --api-key <ApiKeyId> --include-value
 ```
 
-Os parâmetros do deploy (`MongoDbUri`, `MongoDbName`, `JwtSecret`, `JwtExpiresIn`, `SesFromEmail`, `SesAwsRegion`, `AppBaseUrl`) são salvos automaticamente em `samconfig.toml` após o primeiro `--guided`. Deploys subsequentes: `sam build && sam deploy`.
+Os parâmetros do deploy (`MongoDbUri`, `MongoDbName`, `JwtSecret`, `JwtExpiresIn`, `SesFromEmail`, `SesAwsRegion`, `AppBaseUrl`, `S3AvatarsBucket`, `S3AvatarsRegion`, `GoogleAndroidClientId`, `GoogleWebClientId`) são salvos automaticamente em `samconfig.toml` após o primeiro `--guided`. Deploys subsequentes: `sam build && sam deploy`.
+
+**Pré-requisito do Google Sign-In:** seguir `CONTRATO_LOGIN_GOOGLE.md §3` para criar projeto + Client IDs no Google Cloud Console:
+
+- **Android Client ID** (`GoogleAndroidClientId`): obrigatório para o APK próprio (EAS Build). Mesmo valor que o frontend usa em `EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID`.
+- **Web Client ID** (`GoogleWebClientId`): obrigatório para testar no Expo Go (proxy `auth.expo.io`). Mesmo valor que o frontend usa em `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID`.
+
+Pelo menos **um dos dois** precisa estar definido. Ambos têm `Default: ''` no template — o que não usar, deixa em branco. O backend monta o array de `audience` filtrando os vazios e aceita id_token vindo de qualquer client configurado.
 
 **Pré-requisitos do SES antes do primeiro deploy:**
 
@@ -1197,6 +1308,9 @@ Os parâmetros do deploy (`MongoDbUri`, `MongoDbName`, `JwtSecret`, `JwtExpiresI
 - Validação via JSON Schema do Fastify (retorna 400 automaticamente com detalhes)
 - Erros de autenticação: 401
 - Email não verificado no login: 403 com `code: 'EMAIL_NOT_VERIFIED'`
+- Login email/senha em conta criada via Google: 400 com `code: 'PASSWORD_NOT_SET'`
+- Google id_token inválido ou audience errado: 400 com `code: 'INVALID_GOOGLE_TOKEN'`
+- Google id_token com `email_verified: false`: 400 com `code: 'GOOGLE_EMAIL_NOT_VERIFIED'`
 - Recurso não encontrado: 404
 - Email duplicado: 409
 - Erros internos: 500 com mensagem genérica (sem expor detalhes)

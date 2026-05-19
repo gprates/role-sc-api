@@ -7,6 +7,7 @@ import {
   verifyResetCodeSchema,
   resetPasswordSchema,
   changePasswordSchema,
+  googleLoginSchema,
 } from '../schemas/auth.schemas.js';
 import * as authService from '../services/auth.service.js';
 import { authHook } from '../hooks/auth.hook.js';
@@ -23,6 +24,7 @@ import type {
   VerifyResetCodeBody,
   ResetPasswordBody,
   ChangePasswordBody,
+  GoogleLoginBody,
 } from '../types/auth.types.js';
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
@@ -113,6 +115,47 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         request.body.senhaAtual,
         request.body.novaSenha,
       );
+    },
+  );
+
+  // POST /auth/google — público (sem JWT). Troca id_token da Google
+  // pelo nosso JWT. Contrato: CONTRATO_LOGIN_GOOGLE.md §5.1.
+  app.post<{ Body: GoogleLoginBody }>(
+    '/google',
+    { schema: googleLoginSchema },
+    async (request) => {
+      // Log via `request.log` (pino) — sai no MESMO formato e com o mesmo
+      // `reqId` do "request completed" do Fastify, então no CloudWatch fica
+      // fácil de correlacionar tudo numa request só.
+      const idTokenLen = request.body.idToken?.length ?? 0;
+      request.log.info(
+        {
+          event: 'google_login.handler_start',
+          idTokenLength: idTokenLen,
+          hasAndroidClientId: Boolean(process.env.GOOGLE_ANDROID_CLIENT_ID),
+          hasWebClientId: Boolean(process.env.GOOGLE_WEB_CLIENT_ID),
+        },
+        'POST /auth/google iniciado',
+      );
+      try {
+        return await authService.googleLogin(request.body.idToken);
+      } catch (err) {
+        // Re-loga com `request.log` pra garantir que apareça no MESMO entry
+        // que o "request completed". O service também loga via console
+        // (entries separados) — redundância proposital pra não perder info.
+        const e = err as Error & { statusCode?: number; code?: string };
+        request.log.warn(
+          {
+            event: 'google_login.handler_error',
+            errName: e.name,
+            errMessage: e.message,
+            errCode: e.code,
+            statusCode: e.statusCode,
+          },
+          'POST /auth/google falhou',
+        );
+        throw err;
+      }
     },
   );
 }

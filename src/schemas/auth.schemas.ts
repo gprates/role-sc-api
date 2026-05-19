@@ -91,6 +91,21 @@ export const changePasswordSchema = {
   },
 } as const;
 
+// /auth/google: só valida que `idToken` é uma string não-vazia. A validação
+// real (assinatura, audience, expiração) é feita server-side com a
+// `google-auth-library`. NÃO tentar parsear o JWT aqui — qualquer string
+// pode passar pelo schema e ser rejeitada depois.
+export const googleLoginSchema = {
+  body: {
+    type: 'object',
+    required: ['idToken'],
+    properties: {
+      idToken: { type: 'string', minLength: 1 },
+    },
+    additionalProperties: false,
+  },
+} as const;
+
 // Nota: /auth/verify-email NÃO usa JSON Schema porque a resposta é sempre
 // text/html. Qualquer validação do Fastify retornaria 400 JSON — o handler
 // valida manualmente e devolve HTML de erro.

@@ -37,6 +37,10 @@ export interface ChangePasswordBody {
   novaSenha: string;
 }
 
+export interface GoogleLoginBody {
+  idToken: string;
+}
+
 export interface UpdateProfileBody {
   nome: string;
 }

@@ -14,11 +14,30 @@ export function buildApp() {
   app.register(userRoutes, { prefix: '/users' });
   app.register(metadataRoutes);
 
-  app.setErrorHandler((error: Error & { statusCode?: number; code?: string; validation?: unknown }, _request, reply) => {
+  app.setErrorHandler((error: Error & { statusCode?: number; code?: string; validation?: unknown }, request, reply) => {
     const statusCode = error.statusCode ?? 500;
 
     if (statusCode >= 500) {
+      // 5xx: log do erro inteiro com stack — é um bug nosso.
       app.log.error(error);
+    } else {
+      // 4xx: log enxuto mas COM contexto suficiente pra debug no CloudWatch.
+      // Antes só loggávamos 5xx, mas isso escondia bugs do tipo "schema
+      // validation falhando antes do handler" — quem olha o CloudWatch só
+      // via o "request completed" 400 sem nenhuma pista do motivo. Mantemos
+      // 4xx no nível WARN pra não poluir o filtro de erros reais.
+      request.log.warn(
+        {
+          err: { name: error.name, message: error.message, code: error.code },
+          statusCode,
+          route: request.routeOptions?.url ?? request.url,
+          method: request.method,
+          // `validation` vem preenchido em FST_ERR_VALIDATION (JSON Schema).
+          // Mostra QUAL campo do body falhou e o motivo.
+          validation: error.validation,
+        },
+        'request failed (4xx)',
+      );
     }
 
     const payload: { success: false; code?: string; message: string } = {
