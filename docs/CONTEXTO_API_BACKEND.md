@@ -172,6 +172,7 @@ interface Evento {
   horario: string | null;
   local: string | null;
   categoria: string | null;
+  imageUrl?: string | null;  // imagem de capa extraída pelo crawler
   isEvent: boolean;
   municipio: string;
   site: string;
@@ -181,6 +182,8 @@ interface Evento {
   rawCrawlId: ObjectId;
 }
 ```
+
+**Sobre `imageUrl`:** o crawler extrai a imagem de destaque da notícia e salva em `raw_crawls.imageUrl`; o NLP Processor propaga o valor para `eventos.imageUrl` com o mesmo nome. O campo é **opcional** — eventos processados antes dessa mudança, ou notícias sem imagem de destaque, não o possuem. O app cai no placeholder de gradiente da categoria nesses casos.
 
 **Índices existentes (criados pelo NLP Processor):**
 - `{ url: 1 }` — único

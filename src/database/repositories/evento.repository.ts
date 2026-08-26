@@ -9,6 +9,12 @@ async function getCollection(): Promise<Collection<Evento>> {
 
   const db = await getDb();
   collection = db.collection<Evento>('eventos');
+
+  // Suporta GET /eventos ordenado por dataInicio desc (mais recentes primeiro).
+  // O NLP Processor já cria { dataInicio: 1 }; o Mongo usa o índice em ordem
+  // reversa pra sort -1 sem problema.
+  await collection.createIndex({ isEvent: 1, dataInicio: -1 });
+
   return collection;
 }
 
@@ -62,12 +68,31 @@ export async function findEventos(
 
   const skip = (pagination.page - 1) * pagination.limit;
 
+  // Ordenação: data de início descendente (eventos com data mais recente no topo).
+  // `_id` como desempate garante ordem estável entre eventos no mesmo dia.
+  // Eventos sem `dataInicio` (null/ausente) vão pro final da lista — convertemos
+  // pra epoch (1970) só no campo de sort, sem alterar o documento retornado.
   const [data, total] = await Promise.all([
     col
-      .find(filter)
-      .sort({ dataInicio: -1 })
-      .skip(skip)
-      .limit(pagination.limit)
+      .aggregate<Evento>([
+        { $match: filter },
+        {
+          $addFields: {
+            _sortDataInicio: {
+              $convert: {
+                input: '$dataInicio',
+                to: 'date',
+                onError: new Date(0),
+                onNull: new Date(0),
+              },
+            },
+          },
+        },
+        { $sort: { _sortDataInicio: -1, _id: -1 } },
+        { $skip: skip },
+        { $limit: pagination.limit },
+        { $project: { _sortDataInicio: 0 } },
+      ])
       .toArray(),
     col.countDocuments(filter),
   ]);

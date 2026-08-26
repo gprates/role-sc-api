@@ -9,6 +9,9 @@ export interface Evento {
   horario: string | null;
   local: string | null;
   categoria: string | null;
+  // Propagado pelo NLP Processor a partir de `raw_crawls.imageUrl`. Ausente nos
+  // eventos processados antes dessa mudança — o app cai no placeholder da categoria.
+  imageUrl?: string | null;
   isEvent: boolean;
   municipio: string;
   site: string;
