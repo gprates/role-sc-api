@@ -214,6 +214,23 @@ interface User {
 - `{ email: 1 }` — único
 - `{ googleId: 1 }` — **sparse** (a maioria dos users não tem `googleId`, são users de email/senha)
 
+### Coleção `favoritos` (escrita)
+
+```typescript
+interface Favorito {
+  _id?: ObjectId;
+  userId: ObjectId;    // referência ao user dono do favorito
+  eventoId: ObjectId;  // referência ao evento favoritado
+  criadoEm: Date;
+}
+```
+
+**Índices (criados automaticamente pela API na inicialização):**
+- `{ userId: 1, eventoId: 1 }` — **único**, garante que o mesmo evento não seja favoritado duas vezes pelo mesmo usuário. É ele que torna o `POST` idempotente (upsert com `$setOnInsert`, sem read-then-write)
+- `{ userId: 1, criadoEm: -1 }` — listagem "meus favoritos", mais recentes primeiro
+
+> **Referência, não snapshot:** o documento guarda só os dois ids. A listagem faz `$lookup` em `eventos`, então título/imagem/data sempre refletem o que o NLP Processor tem de mais atual. O custo é o favorito órfão (evento removido do banco): o `$unwind` da agregação o descarta silenciosamente da listagem, e o `total` é contado **depois** desse descarte para bater com o que o app recebe.
+
 ### Coleção `emailVerificationTokens` (escrita)
 
 ```typescript
@@ -1012,6 +1029,64 @@ Retorna os detalhes de um evento específico.
   "message": "Evento não encontrado"
 }
 ```
+
+#### `GET /favoritos`
+
+Lista os **eventos** favoritados pelo usuário do token, do mais recém-favoritado para o mais antigo. Mesmo shape de `GET /eventos` (data + pagination), então o app reaproveita o mesmo tipo `Evento`.
+
+**Query params:** `page` (default 1), `limit` (default 20, máx 50).
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "data": [ { "_id": "664b...", "titulo": "Exposição Fotográfica Litoral Vivo", "...": "..." } ],
+  "pagination": { "page": 1, "limit": 20, "total": 1, "totalPages": 1 }
+}
+```
+
+#### `GET /favoritos/ids`
+
+Só os ids dos eventos favoritados, **sem paginação**. É o que o app usa para pintar o coração na Home e no detalhe: a lista de eventos ali vem de `GET /eventos`, e o estado do coração precisa ser conhecido para eventos que não estão na primeira página de favoritos.
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "data": ["664b...", "664c..."]
+}
+```
+
+#### `POST /favoritos/:eventoId`
+
+Favorita um evento para o usuário do token. **Idempotente:** favoritar de novo devolve 200 sem duplicar nem alterar `criadoEm`.
+
+O evento é validado antes de gravar — sem isso a coleção acumularia referências para ids inexistentes, que a listagem descartaria silenciosamente.
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "data": { "eventoId": "664b...", "favorito": true }
+}
+```
+
+**Response 400:** `eventoId` fora do formato ObjectId (24 chars hex).
+**Response 404:** `{ "success": false, "message": "Evento não encontrado" }`
+
+#### `DELETE /favoritos/:eventoId`
+
+Desfavorita. **Idempotente:** remover algo que já não era favorito devolve 200 — o estado final é o que o usuário pediu ao tocar no coração.
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "data": { "eventoId": "664b...", "favorito": false }
+}
+```
+
+> **Isolamento por usuário:** nenhuma rota de favoritos aceita `userId` por parâmetro — ele vem sempre do JWT. Não existe forma de ler ou alterar os favoritos de outra pessoa.
 
 #### `GET /municipios`
 
