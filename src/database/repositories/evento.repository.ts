@@ -26,6 +26,14 @@ export interface EventoFilter {
   search?: string;
 }
 
+/** Converte "Itajaí,Camboriú" em ["Itajaí", "Camboriú"], ignorando vazios. */
+function splitMultiValue(value: string): string[] {
+  return value
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
 export interface PaginationParams {
   page: number;
   limit: number;
@@ -49,8 +57,14 @@ export async function findEventos(
 
   const filter: Record<string, unknown> = { isEvent: true };
 
-  if (filters.municipio) filter.municipio = filters.municipio;
-  if (filters.categoria) filter.categoria = filters.categoria;
+  if (filters.municipio) {
+    const municipios = splitMultiValue(filters.municipio);
+    if (municipios.length > 0) filter.municipio = { $in: municipios };
+  }
+  if (filters.categoria) {
+    const categorias = splitMultiValue(filters.categoria);
+    if (categorias.length > 0) filter.categoria = { $in: categorias };
+  }
 
   if (filters.dataInicio || filters.dataFim) {
     const dateFilter: Record<string, Date> = {};

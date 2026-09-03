@@ -936,8 +936,8 @@ Lista eventos com filtros e paginação. Retorna **apenas** documentos com `isEv
 
 | Param | Tipo | Descrição | Exemplo |
 |-------|------|-----------|---------|
-| `municipio` | string | Filtrar por município | `Itajaí` |
-| `categoria` | string | Filtrar por categoria | `Cultura` |
+| `municipio` | string | Filtrar por município. Aceita múltiplos valores separados por vírgula (`$in` no Mongo — OR entre eles) | `Itajaí` ou `Itajaí,Camboriú` |
+| `categoria` | string | Filtrar por categoria. Aceita múltiplos valores separados por vírgula (`$in` no Mongo — OR entre eles) | `Cultura` ou `Cultura,Esporte` |
 | `dataInicio` | string (YYYY-MM-DD) | Eventos a partir dessa data | `2026-04-01` |
 | `dataFim` | string (YYYY-MM-DD) | Eventos até essa data | `2026-04-30` |
 | `search` | string | Busca textual no título e descrição | `festival` |
