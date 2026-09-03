@@ -938,11 +938,14 @@ Lista eventos com filtros e paginação. Retorna **apenas** documentos com `isEv
 |-------|------|-----------|---------|
 | `municipio` | string | Filtrar por município. Aceita múltiplos valores separados por vírgula (`$in` no Mongo — OR entre eles) | `Itajaí` ou `Itajaí,Camboriú` |
 | `categoria` | string | Filtrar por categoria. Aceita múltiplos valores separados por vírgula (`$in` no Mongo — OR entre eles) | `Cultura` ou `Cultura,Esporte` |
-| `dataInicio` | string (YYYY-MM-DD) | Eventos a partir dessa data | `2026-04-01` |
-| `dataFim` | string (YYYY-MM-DD) | Eventos até essa data | `2026-04-30` |
+| `dataInicio` | string (YYYY-MM-DD) | Eventos que ainda estejam ocorrendo a partir dessa data (overlap — ver nota abaixo) | `2026-04-01` |
+| `dataFim` | string (YYYY-MM-DD) | Eventos que comecem até essa data | `2026-04-30` |
+| `status` | string | `ativos` (não terminaram — em cartaz ou por vir) ou `passados` (último dia já passou). Omitido = sem filtro (todos) | `ativos` |
 | `search` | string | Busca textual no título e descrição | `festival` |
 | `page` | number | Página (default: 1) | `1` |
 | `limit` | number | Itens por página (default: 20, max: 50) | `20` |
+
+> **Overlap em `dataInicio`/`dataFim`:** um evento multi-dia (com `dataFim` preenchido) pode ter começado antes do intervalo pedido e ainda assim estar ocorrendo dentro dele — por isso o filtro compara o intervalo pedido contra `dataFim ?? dataInicio` do evento (não só `dataInicio`). Eventos de dia único (`dataFim: null`) continuam comparados só por `dataInicio`. A mesma lógica de fallback é usada pelo `status`: `ativos` = `(dataFim ?? dataInicio) >= hoje`; `passados` = `(dataFim ?? dataInicio) < hoje`.
 
 **Response 200:**
 ```json
@@ -1343,7 +1346,7 @@ O app React Native (Expo) que consumirá esta API precisa:
 3. **Fluxo de auth:** register → login → armazenar token → enviar `Authorization: Bearer <token>` nas rotas protegidas
 4. **Base URL:** `https://<id>.execute-api.sa-east-1.amazonaws.com/prod`
 5. **Paginação:** usar `page` e `limit` nos query params, exibir total de páginas a partir de `pagination.totalPages`
-6. **Filtros:** enviar como query params (`municipio`, `categoria`, `dataInicio`, `dataFim`, `search`)
+6. **Filtros:** enviar como query params (`municipio`, `categoria`, `dataInicio`, `dataFim`, `status`, `search`)
 
 ---
 

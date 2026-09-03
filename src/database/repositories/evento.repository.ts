@@ -23,6 +23,7 @@ export interface EventoFilter {
   categoria?: string;
   dataInicio?: string;
   dataFim?: string;
+  status?: 'ativos' | 'passados';
   search?: string;
 }
 
@@ -56,6 +57,7 @@ export async function findEventos(
   const col = await getCollection();
 
   const filter: Record<string, unknown> = { isEvent: true };
+  const and: Record<string, unknown>[] = [];
 
   if (filters.municipio) {
     const municipios = splitMultiValue(filters.municipio);
@@ -66,19 +68,44 @@ export async function findEventos(
     if (categorias.length > 0) filter.categoria = { $in: categorias };
   }
 
-  if (filters.dataInicio || filters.dataFim) {
-    const dateFilter: Record<string, Date> = {};
-    if (filters.dataInicio) dateFilter.$gte = new Date(filters.dataInicio);
-    if (filters.dataFim) dateFilter.$lte = new Date(filters.dataFim);
-    filter.dataInicio = dateFilter;
+  // Filtro de intervalo customizado (?dataInicio=&dataFim=): um evento cai no
+  // intervalo se ele estiver ocorrendo em algum ponto dele (overlap), não só se
+  // começar dentro dele. Eventos multi-dia (com `dataFim` preenchido) continuam
+  // aparecendo mesmo tendo começado antes do início do intervalo, desde que
+  // ainda não tenham terminado — por isso comparamos com `dataFim` quando
+  // existir, caindo para `dataInicio` em eventos de dia único.
+  if (filters.dataInicio) {
+    const desde = new Date(filters.dataInicio);
+    and.push({
+      $or: [{ dataFim: { $gte: desde } }, { dataFim: null, dataInicio: { $gte: desde } }],
+    });
+  }
+  if (filters.dataFim) {
+    and.push({ dataInicio: { $lte: new Date(filters.dataFim) } });
+  }
+
+  // Filtro de status: "ativos" = eventos que ainda não terminaram (em cartaz ou
+  // por vir); "passados" = eventos cujo último dia já passou. Mesma lógica de
+  // fallback `dataFim ?? dataInicio` usada acima.
+  if (filters.status === 'ativos' || filters.status === 'passados') {
+    const hoje = new Date();
+    hoje.setUTCHours(0, 0, 0, 0);
+    const op = filters.status === 'ativos' ? '$gte' : '$lt';
+    and.push({
+      $or: [{ dataFim: { [op]: hoje } }, { dataFim: null, dataInicio: { [op]: hoje } }],
+    });
   }
 
   if (filters.search) {
-    filter.$or = [
-      { titulo: { $regex: filters.search, $options: 'i' } },
-      { descricao: { $regex: filters.search, $options: 'i' } },
-    ];
+    and.push({
+      $or: [
+        { titulo: { $regex: filters.search, $options: 'i' } },
+        { descricao: { $regex: filters.search, $options: 'i' } },
+      ],
+    });
   }
+
+  if (and.length > 0) filter.$and = and;
 
   const skip = (pagination.page - 1) * pagination.limit;
 

@@ -8,6 +8,7 @@ interface ListEventosQuery {
   categoria?: string;
   dataInicio?: string;
   dataFim?: string;
+  status?: 'ativos' | 'passados';
   search?: string;
   page?: number;
   limit?: number;

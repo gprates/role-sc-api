@@ -7,6 +7,7 @@ interface ListEventosQuery {
   categoria?: string;
   dataInicio?: string;
   dataFim?: string;
+  status?: 'ativos' | 'passados';
   search?: string;
   page?: number;
   limit?: number;
@@ -18,6 +19,7 @@ export async function listEventos(query: ListEventosQuery) {
     categoria: query.categoria,
     dataInicio: query.dataInicio,
     dataFim: query.dataFim,
+    status: query.status,
     search: query.search,
   };
 
