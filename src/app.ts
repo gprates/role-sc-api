@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { authRoutes } from './routes/auth.routes.js';
+import { comentarioRoutes } from './routes/comentario.routes.js';
 import { eventoRoutes } from './routes/evento.routes.js';
 import { favoritoRoutes } from './routes/favorito.routes.js';
 import { metadataRoutes } from './routes/metadata.routes.js';
@@ -13,6 +14,9 @@ export function buildApp() {
   app.register(authRoutes, { prefix: '/auth' });
   app.register(eventoRoutes, { prefix: '/eventos' });
   app.register(favoritoRoutes, { prefix: '/favoritos' });
+  // Listar/criar comentário mora em eventoRoutes (/eventos/:id/comentarios);
+  // aqui ficam editar, excluir e curtir, que só precisam do id do comentário.
+  app.register(comentarioRoutes, { prefix: '/comentarios' });
   app.register(userRoutes, { prefix: '/users' });
   app.register(metadataRoutes);
 

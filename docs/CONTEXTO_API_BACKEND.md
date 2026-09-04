@@ -231,6 +231,44 @@ interface Favorito {
 
 > **Referência, não snapshot:** o documento guarda só os dois ids. A listagem faz `$lookup` em `eventos`, então título/imagem/data sempre refletem o que o NLP Processor tem de mais atual. O custo é o favorito órfão (evento removido do banco): o `$unwind` da agregação o descarta silenciosamente da listagem, e o `total` é contado **depois** desse descarte para bater com o que o app recebe.
 
+### Coleção `comentarios` (escrita)
+
+```typescript
+interface Comentario {
+  _id?: ObjectId;
+  eventoId: ObjectId;  // referência ao evento comentado
+  userId: ObjectId;    // referência ao autor
+  texto: string;       // já trimado, até 1000 chars
+  criadoEm: Date;
+  editadoEm?: Date;    // ausente = nunca editado (é o selo "editado")
+  curtidas: number;    // contador desnormalizado
+}
+```
+
+**Índices (criados automaticamente pela API na inicialização):**
+- `{ eventoId: 1, criadoEm: -1 }` — listagem dos comentários de um evento, mais recentes primeiro (a query quente da feature)
+
+> **Referência, não snapshot:** o documento guarda só o `userId`. A listagem faz `$lookup` em `users`, então trocar nome ou avatar no perfil reflete em todos os comentários já publicados — comportamento de Instagram/Facebook. Autor removido do banco não some da lista: o `$unwind` usa `preserveNullAndEmptyArrays` e o mapper devolve `"Usuário removido"`, porque descartar o item furaria a contagem da paginação.
+
+> **`curtidas` é desnormalizado:** a verdade sobre *quem* curtiu mora em `comentarioCurtidas`; este número existe só pra listagem não precisar contar documentos por comentário. Ele só é movido quando o insert/delete da curtida realmente aconteceu, o que o mantém colado no número real de documentos.
+
+### Coleção `comentarioCurtidas` (escrita)
+
+```typescript
+interface ComentarioCurtida {
+  _id?: ObjectId;
+  comentarioId: ObjectId;
+  userId: ObjectId;
+  criadoEm: Date;
+}
+```
+
+**Índices (criados automaticamente pela API na inicialização):**
+- `{ comentarioId: 1, userId: 1 }` — **único**, uma curtida por pessoa por comentário. É ele que torna o `POST` idempotente (upsert com `$setOnInsert`) e garante que o contador não infle com toque duplo
+- `{ comentarioId: 1 }` — usado pelo cleanup de curtidas quando o comentário é excluído
+
+> **Por que coleção separada e não um array `curtidoPor: ObjectId[]` dentro do comentário:** o array cresceria sem limite dentro do documento e obrigaria a baixar todos os ids só pra responder "eu curti?". Aqui um índice único resolve idempotência e lookup pontual de uma vez.
+
 ### Coleção `emailVerificationTokens` (escrita)
 
 ```typescript
@@ -1088,6 +1126,118 @@ Desfavorita. **Idempotente:** remover algo que já não era favorito devolve 200
 
 > **Isolamento por usuário:** nenhuma rota de favoritos aceita `userId` por parâmetro — ele vem sempre do JWT. Não existe forma de ler ou alterar os favoritos de outra pessoa.
 
+#### `GET /eventos/:id/comentarios`
+
+Comentários do evento, **do mais recente para o mais antigo**. Comentários são **públicos**: a resposta traz os de todos os usuários, não só os do dono do token.
+
+O JWT entra apenas para marcar dois campos por item — nunca como filtro:
+- `meu` — se o usuário do token é o autor (libera "editar/excluir" na UI)
+- `curtidoPorMim` — estado do coraçãozinho para este usuário
+
+**Query params:** `page` (default 1), `limit` (default 20, máx 50).
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "_id": "66a1...",
+      "eventoId": "664b...",
+      "texto": "Alguém vai? Adoraria companhia!",
+      "criadoEm": "2026-09-03T22:58:31.984Z",
+      "editadoEm": null,
+      "curtidas": 2,
+      "curtidoPorMim": true,
+      "meu": false,
+      "autor": {
+        "_id": "6650...",
+        "nome": "Ana Beatriz",
+        "avatarUrl": "https://role-sc-avatars.s3..."
+      }
+    }
+  ],
+  "pagination": { "page": 1, "limit": 20, "total": 1, "totalPages": 1 }
+}
+```
+
+> **`editadoEm` é o selo "editado":** `null` = nunca editado. O app mostra "· editado" sempre que vier preenchido. Não existe boolean separado, justamente pra não haver como o selo contradizer a data.
+
+> **Autor de conta removida:** o comentário continua aparecendo, com `autor.nome = "Usuário removido"`. Descartá-lo furaria a contagem da paginação.
+
+#### `POST /eventos/:id/comentarios`
+
+Cria um comentário no evento, em nome do usuário do token.
+
+O texto passa por `trim()` antes de gravar — o JSON Schema mede chars brutos, então `"   "` passaria por ele e viraria um comentário em branco.
+
+**Body:**
+```json
+{ "texto": "Esse ano promete!" }
+```
+
+**Response 201:** o comentário criado, no mesmo shape da listagem (com `meu: true`, `curtidas: 0`, `editadoEm: null`).
+
+**Response 400:** texto vazio/só espaços (`"O comentário não pode estar vazio"`) ou acima de 1000 caracteres.
+**Response 404:** `{ "success": false, "message": "Evento não encontrado" }` — o evento é validado **antes** de gravar, senão a coleção acumularia comentários pendurados em ids inexistentes.
+
+#### `PATCH /comentarios/:comentarioId`
+
+Edita o texto de um comentário **próprio** e carimba `editadoEm`.
+
+**Body:**
+```json
+{ "texto": "Corrigindo: é às 19h" }
+```
+
+**Response 200:** o comentário atualizado, no mesmo shape da listagem (agora com `editadoEm` preenchido).
+
+**Response 403:** `{ "success": false, "message": "Você só pode editar os seus próprios comentários" }`
+**Response 404:** comentário inexistente.
+
+#### `DELETE /comentarios/:comentarioId`
+
+Exclui um comentário **próprio**. As curtidas dele são removidas junto, senão a coleção `comentarioCurtidas` acumularia órfãos.
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "data": { "_id": "66a1...", "excluido": true }
+}
+```
+
+**Response 403:** `{ "success": false, "message": "Você só pode excluir os seus próprios comentários" }`
+**Response 404:** comentário inexistente.
+
+#### `POST /comentarios/:comentarioId/curtida`
+
+Curte um comentário (qualquer um, inclusive o próprio — como no Instagram). **Idempotente:** curtir de novo devolve 200 sem inflar o contador, porque o `$inc` só roda quando o upsert realmente inseriu.
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "data": { "_id": "66a1...", "curtidas": 3, "curtidoPorMim": true }
+}
+```
+
+**Response 404:** comentário inexistente.
+
+#### `DELETE /comentarios/:comentarioId/curtida`
+
+Descurte. **Idempotente** pelo mesmo motivo: o estado final é "não curtido", e o contador nunca vai a negativo.
+
+**Response 200:**
+```json
+{
+  "success": true,
+  "data": { "_id": "66a1...", "curtidas": 2, "curtidoPorMim": false }
+}
+```
+
+> **Autorização no banco, não só no service:** o `UPDATE`/`DELETE` de comentário filtra por `{ _id, userId }`. Mesmo que a checagem do service falhasse, um comentário de outra pessoa não casaria com nenhum documento.
+
 #### `GET /municipios`
 
 Retorna a lista de municípios que possuem eventos cadastrados.
@@ -1242,7 +1392,14 @@ src/
 │   │                             POST /auth/forgot-password, POST /auth/verify-reset-code,
 │   │                             POST /auth/reset-password, POST /auth/change-password,
 │   │                             POST /auth/google
-│   ├── evento.routes.ts        ← GET /eventos, GET /eventos/:id
+│   ├── evento.routes.ts        ← GET /eventos, GET /eventos/:id,
+│   │                             GET /eventos/:id/comentarios, POST /eventos/:id/comentarios
+│   ├── favorito.routes.ts      ← GET /favoritos, GET /favoritos/ids,
+│   │                             POST /favoritos/:eventoId, DELETE /favoritos/:eventoId
+│   ├── comentario.routes.ts    ← PATCH /comentarios/:id, DELETE /comentarios/:id,
+│   │                             POST|DELETE /comentarios/:id/curtida
+│   │                             (listar/criar ficam em evento.routes.ts: o Fastify exige
+│   │                              o mesmo nome de parâmetro `:id` no mesmo nó da árvore)
 │   ├── user.routes.ts          ← PATCH /users/me,
 │   │                             POST /users/me/avatar/upload-url, POST /users/me/avatar/confirm
 │   └── metadata.routes.ts      ← GET /municipios, GET /categorias
@@ -1254,7 +1411,10 @@ src/
 │   ├── avatar.service.ts       ← getUploadUrl (presigned PUT), confirmAvatar (HEAD + DB)
 │   ├── email.service.ts        ← sendVerificationEmail, sendResetCodeEmail,
 │   │                             sendPasswordChangedEmail (AWS SES v2)
-│   └── evento.service.ts       ← queries com filtros, paginação, busca
+│   ├── evento.service.ts       ← queries com filtros, paginação, busca
+│   ├── favorito.service.ts     ← listFavoritos, listFavoritoIds, addFavorito, removeFavorito
+│   └── comentario.service.ts   ← listComentarios, criarComentario, editarComentario,
+│                                 excluirComentario, curtirComentario, descurtirComentario
 ├── hooks/
 │   └── auth.hook.ts            ← preHandler do Fastify que verifica JWT
 ├── database/
@@ -1269,7 +1429,13 @@ src/
 │       │                                       findLatestByUserId (+ TTL index)
 │       ├── passwordResetToken.repository.ts ← create, findByToken, deleteByUserId
 │       │                                       (+ TTL index, unique no token)
-│       └── evento.repository.ts ← findEventos, findEventoById, getDistinctMunicipios
+│       ├── evento.repository.ts ← findEventos, findEventoById, getDistinctMunicipios
+│       ├── favorito.repository.ts ← addFavorito, removeFavorito, findEventoIdsByUser,
+│       │                             findEventosFavoritos
+│       └── comentario.repository.ts ← findComentariosByEvento, insertComentario,
+│                                       findComentarioById, updateComentarioTexto,
+│                                       deleteComentario, addCurtida, removeCurtida,
+│                                       isCurtidoPor, incrementCurtidas
 ├── types/
 │   ├── user.types.ts           ← User (inclui avatarUrl?), UserInsert, UserPublic
 │   ├── emailVerification.types.ts ← EmailVerificationToken, EmailVerificationTokenInsert
@@ -1277,6 +1443,9 @@ src/
 │   ├── avatar.types.ts         ← AvatarMimeType + constantes (AVATAR_MAX_SIZE_BYTES,
 │   │                              AVATAR_ACCEPTED_MIME_TYPES) + Body/Response shapes
 │   ├── evento.types.ts         ← Evento, Categoria, CATEGORIAS_VALIDAS
+│   ├── favorito.types.ts       ← Favorito
+│   ├── comentario.types.ts     ← Comentario, ComentarioCurtida, ComentarioComAutor,
+│   │                              ComentarioPublic, COMENTARIO_MAX_LENGTH
 │   └── auth.types.ts           ← LoginBody, RegisterBody, ResendVerificationBody,
 │                                  VerifyEmailQuery, JwtPayload, VerifyEmailResult,
 │                                  ForgotPasswordBody, VerifyResetCodeBody, ResetPasswordBody,
@@ -1287,13 +1456,19 @@ src/
 │   │                             changePassword, googleLogin
 │   │                             (verify-email NÃO usa schema — handler retorna HTML)
 │   ├── user.schemas.ts         ← JSON Schema: avatarUploadUrl, avatarConfirm, updateProfile
-│   └── evento.schemas.ts       ← JSON Schema para query params de listagem
+│   ├── evento.schemas.ts       ← JSON Schema para query params de listagem
+│   ├── favorito.schemas.ts     ← JSON Schema: listFavoritos, favoritoParams
+│   └── comentario.schemas.ts   ← JSON Schema: listComentarios, criarComentario,
+│                                 editarComentario, comentarioParams
 └── utils/
     ├── jwt.utils.ts            ← signToken, verifyToken, extractTokenFromHeader
     ├── emailVerifyPages.ts     ← renderSuccessPage, renderErrorPage, escapeHtml
     ├── passwordValidator.ts    ← isStrongPassword (regex em sincronia com o frontend)
     ├── userMappers.ts          ← toPublicUser (User → UserPublic, omite senha,
     │                             omite avatarUrl undefined, normaliza emailVerified)
+    ├── comentarioMappers.ts    ← toPublicComentario (linha da agregação → payload,
+    │                             deriva `meu`, normaliza `editadoEm` pra Date | null),
+    │                             toPublicComentarioDoAutor (criar/editar, sem agregação)
     └── logger.utils.ts         ← createLogger (mesmo padrão do NLP)
 ```
 
