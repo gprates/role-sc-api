@@ -2,6 +2,7 @@ import {
   AVATAR_ACCEPTED_MIME_TYPES,
   AVATAR_MAX_SIZE_BYTES,
 } from '../types/avatar.types.js';
+import { NOME_MAX_LENGTH, NOME_MIN_LENGTH } from '../types/user.types.js';
 
 // Nota: sobre a estratégia de validação:
 //
@@ -69,7 +70,11 @@ export const updateProfileSchema = {
     type: 'object',
     required: ['nome'],
     properties: {
-      nome: { type: 'string', minLength: 2, maxLength: 80 },
+      nome: {
+        type: 'string',
+        minLength: NOME_MIN_LENGTH,
+        maxLength: NOME_MAX_LENGTH,
+      },
     },
     additionalProperties: false,
   },

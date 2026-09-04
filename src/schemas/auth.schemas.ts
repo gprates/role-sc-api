@@ -1,3 +1,5 @@
+import { NOME_MAX_LENGTH, NOME_MIN_LENGTH } from '../types/user.types.js';
+
 export const registerSchema = {
   body: {
     type: 'object',
@@ -6,7 +8,11 @@ export const registerSchema = {
       // Mesmos limites do updateProfileSchema (PATCH /users/me). Antes o
       // cadastro não tinha teto: dava pra criar a conta com um nome que a
       // própria tela de editar perfil depois recusava salvar.
-      nome: { type: 'string', minLength: 2, maxLength: 80 },
+      nome: {
+        type: 'string',
+        minLength: NOME_MIN_LENGTH,
+        maxLength: NOME_MAX_LENGTH,
+      },
       email: { type: 'string', format: 'email' },
       senha: { type: 'string', minLength: 6 },
     },

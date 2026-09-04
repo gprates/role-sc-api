@@ -10,6 +10,7 @@ import * as emailService from './email.service.js';
 import { signToken } from '../utils/jwt.utils.js';
 import { createLogger } from '../utils/logger.utils.js';
 import { isStrongPassword } from '../utils/passwordValidator.js';
+import { NOME_MAX_LENGTH, NOME_MIN_LENGTH } from '../types/user.types.js';
 import { toPublicUser } from '../utils/userMappers.js';
 import type {
   RegisterBody,
@@ -734,6 +735,26 @@ async function verifyGoogleIdToken(idToken: string): Promise<GoogleIdTokenPayloa
   };
 }
 
+/**
+ * Ajusta o nome vindo do Google para o mesmo intervalo (2..80) que o cadastro
+ * e a edição de perfil exigem.
+ *
+ * Trunca em vez de rejeitar: barrar um login legítimo do Google só porque o
+ * nome da conta é longo seria pior do que cortá-lo — e a pessoa pode arrumar
+ * depois em Editar perfil. Sem isto, uma conta Google com nome acima de 80
+ * caracteres nasceria num estado que a própria tela de perfil recusa salvar,
+ * porque este caminho não passa por nenhum JSON Schema.
+ */
+function normalizarNomeGoogle(nome: string, email: string): string {
+  const limpo = nome.trim().slice(0, NOME_MAX_LENGTH);
+  if (limpo.length >= NOME_MIN_LENGTH) return limpo;
+
+  // Nome curto demais (o Google permite um caractere só): cai para a parte
+  // local do email, que sempre tem pelo menos 1 char — e completa se preciso.
+  const doEmail = email.split('@')[0].slice(0, NOME_MAX_LENGTH);
+  return doEmail.length >= NOME_MIN_LENGTH ? doEmail : 'Usuário';
+}
+
 export async function googleLogin(
   idToken: string,
 ): Promise<{
@@ -815,7 +836,7 @@ export async function googleLogin(
   //    follow-up (CONTRATO_LOGIN_GOOGLE.md §11).
   const now = new Date();
   const userId = await userRepo.insertUser({
-    nome: payload.name,
+    nome: normalizarNomeGoogle(payload.name, payload.email),
     email: payload.email,
     // emailVerified: true porque Google já validou — pula o fluxo de SES.
     emailVerified: true,

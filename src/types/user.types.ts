@@ -1,5 +1,12 @@
 import type { ObjectId } from 'mongodb';
 
+// Limites do nome de exibição. Ficam aqui porque valem para os TRÊS caminhos
+// que gravam nome: cadastro (registerSchema), edição (updateProfileSchema) e
+// criação via Google (googleLogin) — que não passa por schema nenhum.
+// Divergir entre eles cria conta que a própria tela de perfil recusa salvar.
+export const NOME_MIN_LENGTH = 2;
+export const NOME_MAX_LENGTH = 80;
+
 export interface User {
   _id?: ObjectId;
   nome: string;
