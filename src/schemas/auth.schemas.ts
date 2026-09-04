@@ -3,7 +3,10 @@ export const registerSchema = {
     type: 'object',
     required: ['nome', 'email', 'senha'],
     properties: {
-      nome: { type: 'string', minLength: 2 },
+      // Mesmos limites do updateProfileSchema (PATCH /users/me). Antes o
+      // cadastro não tinha teto: dava pra criar a conta com um nome que a
+      // própria tela de editar perfil depois recusava salvar.
+      nome: { type: 'string', minLength: 2, maxLength: 80 },
       email: { type: 'string', format: 'email' },
       senha: { type: 'string', minLength: 6 },
     },

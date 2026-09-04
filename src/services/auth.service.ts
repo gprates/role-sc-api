@@ -53,6 +53,13 @@ export async function register(
     throw error;
   }
 
+  // Mesma regra de changePassword/resetPassword. O app já valida no cadastro,
+  // mas sem isto aqui o servidor aceitaria uma senha fraca vinda de fora e a
+  // pessoa ficaria com uma senha que ela nunca conseguiria repetir ao trocar.
+  if (!isStrongPassword(body.senha)) {
+    throw makeWeakPasswordError();
+  }
+
   const hashedPassword = await bcrypt.hash(body.senha, SALT_ROUNDS);
 
   const userId = await userRepo.insertUser({

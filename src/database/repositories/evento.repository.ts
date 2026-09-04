@@ -27,6 +27,18 @@ export interface EventoFilter {
   search?: string;
 }
 
+/**
+ * Escapa metacaracteres pra o termo de busca ser tratado como TEXTO LITERAL.
+ *
+ * Sem isso o que o usuário digita vira um regex de verdade: buscar "(", "*"
+ * ou "[" montava um padrão inválido e o Mongo derrubava a request com 500,
+ * enquanto "." ou "a+" casavam com todos os eventos em vez de procurar esses
+ * caracteres. Uma caixa de busca deve procurar o que foi digitado.
+ */
+function escapeRegex(texto: string): string {
+  return texto.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /** Converte "Itajaí,Camboriú" em ["Itajaí", "Camboriú"], ignorando vazios. */
 function splitMultiValue(value: string): string[] {
   return value
@@ -129,10 +141,11 @@ export async function findEventos(
   }
 
   if (filters.search) {
+    const termo = escapeRegex(filters.search);
     and.push({
       $or: [
-        { titulo: { $regex: filters.search, $options: 'i' } },
-        { descricao: { $regex: filters.search, $options: 'i' } },
+        { titulo: { $regex: termo, $options: 'i' } },
+        { descricao: { $regex: termo, $options: 'i' } },
       ],
     });
   }
