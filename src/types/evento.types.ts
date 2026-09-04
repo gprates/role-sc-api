@@ -19,6 +19,9 @@ export interface Evento {
   publishedAt: string;
   processedAt: Date;
   rawCrawlId: ObjectId;
+  // Anexado pelas agregações de listagem (não existe no documento gravado pelo
+  // NLP Processor). É o que alimenta o contador no card da Home/Favoritos.
+  totalComentarios?: number;
 }
 
 export const CATEGORIAS_VALIDAS = [

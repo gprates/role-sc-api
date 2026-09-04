@@ -2,9 +2,10 @@ import { ObjectId, type Collection } from 'mongodb';
 import { getDb } from '../mongodb.connection.js';
 import type { Favorito } from '../../types/favorito.types.js';
 import type { Evento } from '../../types/evento.types.js';
-import type {
-  PaginatedResult,
-  PaginationParams,
+import {
+  CONTAGEM_COMENTARIOS_STAGES,
+  type PaginatedResult,
+  type PaginationParams,
 } from './evento.repository.js';
 import { createLogger } from '../../utils/logger.utils.js';
 
@@ -96,7 +97,13 @@ export async function findEventosFavoritos(
       { $replaceRoot: { newRoot: '$evento' } },
       {
         $facet: {
-          data: [{ $skip: skip }, { $limit: pagination.limit }],
+          // Mesma contagem de comentários da listagem de eventos: a tela de
+          // Favoritos renderiza o MESMO EventoCard, então precisa do campo.
+          data: [
+            { $skip: skip },
+            { $limit: pagination.limit },
+            ...CONTAGEM_COMENTARIOS_STAGES,
+          ],
           total: [{ $count: 'count' }],
         },
       },

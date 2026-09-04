@@ -40,6 +40,38 @@ export interface PaginationParams {
   limit: number;
 }
 
+/**
+ * Estágios que anexam `totalComentarios` a cada evento da página.
+ *
+ * Fica aqui (e não numa contagem por evento no app) porque `eventos` é
+ * SOMENTE LEITURA para esta API — quem escreve nessa coleção é o NLP
+ * Processor, então não dá pra manter um contador desnormalizado no documento
+ * sem correr o risco de ele ser sobrescrito no próximo processamento.
+ *
+ * Precisa ser aplicado DEPOIS do `$skip`/`$limit`: assim o join roda só sobre
+ * os ~20 eventos da página, e não sobre o resultado inteiro do filtro. O
+ * `$lookup` usa o índice `{ eventoId: 1, criadoEm: -1 }` de `comentarios`.
+ */
+export const CONTAGEM_COMENTARIOS_STAGES = [
+  {
+    $lookup: {
+      from: 'comentarios',
+      localField: '_id',
+      foreignField: 'eventoId',
+      as: 'contagemComentarios',
+      pipeline: [{ $count: 'total' }],
+    },
+  },
+  {
+    $addFields: {
+      totalComentarios: {
+        $ifNull: [{ $arrayElemAt: ['$contagemComentarios.total', 0] }, 0],
+      },
+    },
+  },
+  { $project: { contagemComentarios: 0 } },
+];
+
 export interface PaginatedResult<T> {
   data: T[];
   pagination: {
@@ -133,6 +165,7 @@ export async function findEventos(
         { $skip: skip },
         { $limit: pagination.limit },
         { $project: { _sortDataInicio: 0 } },
+        ...CONTAGEM_COMENTARIOS_STAGES,
       ])
       .toArray(),
     col.countDocuments(filter),
