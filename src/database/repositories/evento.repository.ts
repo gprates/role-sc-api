@@ -10,9 +10,8 @@ async function getCollection(): Promise<Collection<Evento>> {
   const db = await getDb();
   collection = db.collection<Evento>('eventos');
 
-  // Suporta GET /eventos ordenado por dataInicio desc (mais recentes primeiro).
-  // O NLP Processor já cria { dataInicio: 1 }; o Mongo usa o índice em ordem
-  // reversa pra sort -1 sem problema.
+  // Atende o $match de GET /eventos (isEvent + faixa de datas). A ordenação da
+  // listagem é por campo calculado, então o sort em si não usa índice.
   await collection.createIndex({ isEvent: 1, dataInicio: -1 });
 
   return collection;
@@ -128,12 +127,13 @@ export async function findEventos(
     and.push({ dataInicio: { $lte: new Date(filters.dataFim) } });
   }
 
+  const hoje = new Date();
+  hoje.setUTCHours(0, 0, 0, 0);
+
   // Filtro de status: "ativos" = eventos que ainda não terminaram (em cartaz ou
   // por vir); "passados" = eventos cujo último dia já passou. Mesma lógica de
   // fallback `dataFim ?? dataInicio` usada acima.
   if (filters.status === 'ativos' || filters.status === 'passados') {
-    const hoje = new Date();
-    hoje.setUTCHours(0, 0, 0, 0);
     const op = filters.status === 'ativos' ? '$gte' : '$lt';
     and.push({
       $or: [{ dataFim: { [op]: hoje } }, { dataFim: null, dataInicio: { [op]: hoje } }],
@@ -154,30 +154,68 @@ export async function findEventos(
 
   const skip = (pagination.page - 1) * pagination.limit;
 
-  // Ordenação: data de início descendente (eventos com data mais recente no topo).
-  // `_id` como desempate garante ordem estável entre eventos no mesmo dia.
-  // Eventos sem `dataInicio` (null/ausente) vão pro final da lista — convertemos
-  // pra epoch (1970) só no campo de sort, sem alterar o documento retornado.
+  // Ordenação em três grupos, na ordem em que interessam ao usuário:
+  //   0 · por vir / em cartaz — o mais PRÓXIMO primeiro. Evento que já começou
+  //       conta como "hoje" (max(dataInicio, hoje)), e no empate quem começa
+  //       hoje de fato vem antes de quem está em cartaz há semanas.
+  //   1 · passados — o mais RECENTE primeiro (pela data em que terminou).
+  //   2 · sem dataInicio — no final.
+  // A versão anterior ordenava tudo por dataInicio desc, o que em "Por vir"
+  // punha o evento mais distante no topo: um show de dezembro ficava fixo na
+  // frente dos eventos da semana e o site parecia nunca atualizar.
+  // Os campos `_sort*` existem só no pipeline; o documento sai sem eles.
   const [data, total] = await Promise.all([
     col
       .aggregate<Evento>([
         { $match: filter },
         {
           $addFields: {
-            _sortDataInicio: {
-              $convert: {
-                input: '$dataInicio',
-                to: 'date',
-                onError: new Date(0),
-                onNull: new Date(0),
+            _sortInicio: {
+              $convert: { input: '$dataInicio', to: 'date', onError: null, onNull: null },
+            },
+            _sortFim: {
+              $convert: { input: '$dataFim', to: 'date', onError: null, onNull: null },
+            },
+          },
+        },
+        {
+          $addFields: {
+            _sortGrupo: {
+              $switch: {
+                branches: [
+                  { case: { $eq: ['$_sortInicio', null] }, then: 2 },
+                  { case: { $lt: [{ $ifNull: ['$_sortFim', '$_sortInicio'] }, hoje] }, then: 1 },
+                ],
+                default: 0,
               },
             },
           },
         },
-        { $sort: { _sortDataInicio: -1, _id: -1 } },
+        {
+          $addFields: {
+            _sortChave: {
+              $switch: {
+                branches: [
+                  {
+                    case: { $eq: ['$_sortGrupo', 0] },
+                    then: { $toLong: { $max: ['$_sortInicio', hoje] } },
+                  },
+                  {
+                    case: { $eq: ['$_sortGrupo', 1] },
+                    then: {
+                      $multiply: [{ $toLong: { $ifNull: ['$_sortFim', '$_sortInicio'] } }, -1],
+                    },
+                  },
+                ],
+                default: 0,
+              },
+            },
+          },
+        },
+        { $sort: { _sortGrupo: 1, _sortChave: 1, _sortInicio: -1, _id: -1 } },
         { $skip: skip },
         { $limit: pagination.limit },
-        { $project: { _sortDataInicio: 0 } },
+        { $project: { _sortInicio: 0, _sortFim: 0, _sortGrupo: 0, _sortChave: 0 } },
         ...CONTAGEM_COMENTARIOS_STAGES,
       ])
       .toArray(),
