@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/invoke-local.ts",
     "build": "node esbuild.config.js",
-    "start": "node dist/handler.js"
+    "start": "node dist/server.js"
   },
   "engines": {
     "node": ">=24.0.0"
@@ -23,6 +23,8 @@
     "@aws-sdk/s3-request-presigner": "^3.1043.0",
     "@fastify/aws-lambda": "^6.4.0",
     "@fastify/cors": "^11.2.0",
+    "@fastify/swagger": "^9.9.2",
+    "@fastify/swagger-ui": "^6.1.2",
     "bcryptjs": "^3.0.3",
     "dotenv": "^17.4.2",
     "fastify": "^5.8.5",

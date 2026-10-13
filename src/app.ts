@@ -1,4 +1,4 @@
-import Fastify from 'fastify';
+import Fastify, { type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import { authRoutes } from './routes/auth.routes.js';
 import { comentarioRoutes } from './routes/comentario.routes.js';
@@ -7,10 +7,18 @@ import { favoritoRoutes } from './routes/favorito.routes.js';
 import { metadataRoutes } from './routes/metadata.routes.js';
 import { userRoutes } from './routes/user.routes.js';
 
-export function buildApp() {
+export interface BuildAppOptions {
+  // Plugins registrados antes das rotas. O servidor HTTP (invoke-local.ts)
+  // usa para a documentação OpenAPI; o handler da Lambda chama buildApp()
+  // sem opções, então o Swagger não entra no bundle da Lambda.
+  beforeRoutes?: (app: FastifyInstance) => void;
+}
+
+export function buildApp(options: BuildAppOptions = {}) {
   const app = Fastify({ logger: true });
 
   app.register(cors);
+  options.beforeRoutes?.(app);
   app.register(authRoutes, { prefix: '/auth' });
   app.register(eventoRoutes, { prefix: '/eventos' });
   app.register(favoritoRoutes, { prefix: '/favoritos' });

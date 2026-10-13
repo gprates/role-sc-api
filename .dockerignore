@@ -1,0 +1,16 @@
+.git
+.gitignore
+node_modules
+dist
+.aws-sam
+samconfig.toml
+.history
+docs
+AUDITORIA.md
+README.md
+.env
+.env.*
+!.env.example
+*.zip
+Dockerfile
+.dockerignore
