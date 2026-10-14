@@ -59,6 +59,8 @@ const DESCRICAO = `API REST do Rolê SC: eventos do litoral de Santa Catarina, a
 - \`Authorization: Bearer <JWT>\`: token obtido em \`POST /auth/login\` ou \`POST /auth/google\`, validado pela própria API nas rotas protegidas.
 - \`x-api-key\`: exigido **apenas em produção**, pelo API Gateway, em todas as rotas exceto \`GET /auth/verify-email\`. A aplicação não confere esse cabeçalho; rodando localmente ou no Docker ele pode ser omitido. Sem a chave, o API Gateway responde \`403 {"message":"Forbidden"}\` antes de a requisição chegar à API; acima da cota do Usage Plan, \`429\`.
 
+**Origem**: o cabeçalho opcional \`x-client\` (\`web\` no site, \`app/<versão>\` no app) aparece como \`client\` nos logs da API. É só informativo e não altera a resposta.
+
 **Erros** seguem \`{ "success": false, "message": "...", "code": "..." }\`. O \`code\` (UPPER_SNAKE_CASE) só aparece em erros de domínio; erros de validação de schema (400) e erros 5xx não o trazem.
 
 **Campos extras** no corpo ou na query (schemas com \`additionalProperties: false\`) são descartados silenciosamente, sem erro 400.

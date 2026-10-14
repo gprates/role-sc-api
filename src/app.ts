@@ -15,7 +15,16 @@ export interface BuildAppOptions {
 }
 
 export function buildApp(options: BuildAppOptions = {}) {
-  const app = Fastify({ logger: true });
+  const app = Fastify({
+    logger: true,
+    // Todo log de uma requisição leva `client`, vindo do header `x-client`:
+    // "web" no site (injetado pelo CloudFront) e "app/<versão>" no app.
+    // É autodeclarado: serve para métrica, não para controle de acesso.
+    childLoggerFactory(logger, bindings, opts, rawReq) {
+      const client = rawReq.headers['x-client'];
+      return logger.child(client ? { ...bindings, client } : bindings, opts);
+    },
+  });
 
   app.register(cors);
   options.beforeRoutes?.(app);
