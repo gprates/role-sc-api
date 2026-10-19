@@ -208,3 +208,7 @@ esbuild.config.js    build local (pnpm build)
 Dockerfile           imagem do servidor HTTP
 docs/                documentos de contexto e coleções Insomnia
 ```
+
+## Licença
+
+Distribuído sob a licença MIT. Veja o arquivo LICENSE.

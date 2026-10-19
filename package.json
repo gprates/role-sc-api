@@ -1,6 +1,7 @@
 {
   "name": "role-sc-api",
   "version": "1.0.0",
+  "license": "MIT",
   "description": "API REST para o app Rolê SC — expõe eventos culturais e municipais via Fastify + AWS Lambda",
   "type": "module",
   "scripts": {
