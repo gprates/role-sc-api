@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "tsx watch src/invoke-local.ts",
     "build": "node esbuild.config.js",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "test": "node --import tsx --test \"test/**/*.test.ts\""
   },
   "engines": {
     "node": ">=24.0.0"
@@ -37,6 +38,7 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^25.6.0",
     "esbuild": "^0.28.0",
+    "mongodb-memory-server-core": "^11.3.0",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   }

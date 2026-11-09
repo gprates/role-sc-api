@@ -132,6 +132,8 @@ No servidor HTTP (`pnpm dev`, `pnpm start`, Docker) elas vêm do ambiente ou do 
 | `S3_AVATARS_REGION` | para avatar | `sa-east-1` | `S3AvatarsRegion` | Região do bucket |
 | `GOOGLE_ANDROID_CLIENT_ID` | para login Google | vazio | `GoogleAndroidClientId` | Audience aceita no `id_token` (app Android) |
 | `GOOGLE_WEB_CLIENT_ID` | para login Google | vazio | `GoogleWebClientId` | Audience aceita no `id_token` (web e Expo Go) |
+| `EMAIL_DAILY_LIMIT` | não (padrão `100`) | `100` | `EmailDailyLimit` | Teto global por dia (fuso America/Sao_Paulo) de e-mails de verificação e de recuperação de senha. Acima dele, `register` e `forgot-password` respondem 429 (`EMAIL_LIMIT_REACHED`) |
+| `REGISTER_IP_HOURLY_LIMIT` | não (padrão `3`) | `3` | `RegisterIpHourlyLimit` | Cadastros por IP por hora. Acima dele, `register` responde 429 (`TOO_MANY_REGISTRATIONS`) |
 
 Os Client IDs do Google precisam ser os mesmos usados pelo app (`EXPO_PUBLIC_GOOGLE_*_CLIENT_ID`) e pelo site (`VITE_GOOGLE_WEB_CLIENT_ID`). Basta um dos dois estar preenchido.
 
@@ -158,7 +160,8 @@ A especificação é gerada a partir das rotas registradas no Fastify: corpo, qu
 | `pnpm dev` | `tsx watch src/invoke-local.ts`: servidor HTTP na porta 3000, com recarga automática |
 | `pnpm build` | esbuild: gera `dist/handler.js` (Lambda, com todas as dependências) e `dist/server.js` (servidor HTTP, usa `node_modules`) |
 | `pnpm start` | `node dist/server.js` (rode `pnpm build` antes) |
-| `npx tsc --noEmit` | Checagem de tipos (não há script nem testes automatizados) |
+| `pnpm test` | Testes dos limites de envio de e-mail (`node:test`). Sobem um MongoDB temporário em memória (o binário é baixado na primeira execução) |
+| `npx tsc --noEmit` | Checagem de tipos (não há script) |
 
 ## Deploy (AWS SAM)
 
@@ -166,7 +169,7 @@ O deploy é feito da máquina do desenvolvedor com o AWS SAM CLI; não há CI/CD
 
 - a função Lambda `ROLE_SC_API` (Node 24, 256 MB, timeout de 30 s), com o handler `src/handler.ts`;
 - a API REST (estágio `prod`) com `ApiKeyRequired: true` e duas rotas: `GET /auth/verify-email` sem API Key (é aberta pelo link do e-mail) e `ANY /{proxy+}` com API Key;
-- a API Key, o Usage Plan (50 req/s, rajada de 25, 10.000 req/dia) e o vínculo entre os dois;
+- a API Key, o Usage Plan (50 req/s, rajada de 25, 30.000 req/dia) e o vínculo entre os dois;
 - o bucket S3 de avatares, com leitura pública em `avatars/*`, e as permissões da função para SES e S3.
 
 ### Pré-requisitos

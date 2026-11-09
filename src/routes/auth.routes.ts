@@ -11,6 +11,7 @@ import {
 } from '../schemas/auth.schemas.js';
 import * as authService from '../services/auth.service.js';
 import { authHook } from '../hooks/auth.hook.js';
+import { getClientIp } from '../utils/clientIp.utils.js';
 import {
   renderSuccessPage,
   renderErrorPage,
@@ -32,7 +33,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     '/register',
     { schema: registerSchema },
     async (request, reply) => {
-      const result = await authService.register(request.body);
+      const result = await authService.register(request.body, getClientIp(request));
       return reply.status(201).send(result);
     },
   );

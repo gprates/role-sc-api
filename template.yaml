@@ -47,6 +47,14 @@ Parameters:
     Description: OAuth Web Client ID do Google Cloud Console (mesmo valor que EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID do frontend). Usado como audience na validação do id_token em POST /auth/google quando o app vem do Expo Go (proxy auth.expo.io).
     Default: ''
     NoEcho: true
+  EmailDailyLimit:
+    Type: Number
+    Description: Teto global de e-mails de verificação e de recuperação de senha por dia (fuso America/Sao_Paulo). Acima dele a API responde 429.
+    Default: 100
+  RegisterIpHourlyLimit:
+    Type: Number
+    Description: Máximo de cadastros por IP por hora em POST /auth/register. Acima dele a API responde 429.
+    Default: 3
 
 Globals:
   Function:
@@ -87,6 +95,8 @@ Resources:
           S3_AVATARS_REGION: !Ref S3AvatarsRegion
           GOOGLE_ANDROID_CLIENT_ID: !Ref GoogleAndroidClientId
           GOOGLE_WEB_CLIENT_ID: !Ref GoogleWebClientId
+          EMAIL_DAILY_LIMIT: !Ref EmailDailyLimit
+          REGISTER_IP_HOURLY_LIMIT: !Ref RegisterIpHourlyLimit
       Policies:
         - Version: '2012-10-17'
           Statement:
@@ -191,7 +201,7 @@ Resources:
         RateLimit: 50
         BurstLimit: 25
       Quota:
-        Limit: 10000
+        Limit: 30000
         Period: DAY
       ApiStages:
         - ApiId: !Ref RoleScRestApi

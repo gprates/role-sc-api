@@ -219,12 +219,13 @@ const ROTAS: Record<string, DocRota> = {
     tags: ['Auth'],
     summary: 'Cria conta com e-mail e senha',
     description:
-      'Cria o usuário com `emailVerified: false` e envia o link de verificação pelo SES. A força da senha (8+ caracteres, maiúscula, minúscula, dígito e caractere especial) é validada no serviço. Sem SES (ambiente local), responde 500 e desfaz o cadastro.',
+      'Cria o usuário com `emailVerified: false` e envia o link de verificação pelo SES. A força da senha (8+ caracteres, maiúscula, minúscula, dígito e caractere especial) é validada no serviço. Sem SES (ambiente local), responde 500 e desfaz o cadastro. Limites: `REGISTER_IP_HOURLY_LIMIT` cadastros por IP por hora (padrão 3) e teto global de `EMAIL_DAILY_LIMIT` e-mails por dia (padrão 100).',
     security: PUBLICA,
     response: {
       201: json('Conta criada; e-mail de verificação enviado', MENSAGEM),
       400: erro('Corpo inválido ou senha fraca (`WEAK_PASSWORD`)'),
       409: erro('E-mail já cadastrado'),
+      429: erro('Limite de cadastros por IP (`TOO_MANY_REGISTRATIONS`) ou teto diário de e-mails (`EMAIL_LIMIT_REACHED`) atingido'),
       500: erro('Falha ao enviar o e-mail de verificação (cadastro desfeito)'),
     },
   },
@@ -268,7 +269,7 @@ const ROTAS: Record<string, DocRota> = {
     tags: ['Auth'],
     summary: 'Reenvia o e-mail de verificação',
     description:
-      'Resposta sempre genérica (não revela se o e-mail existe). Intervalo mínimo de 60 s entre envios para o mesmo usuário.',
+      'Resposta sempre genérica (não revela se o e-mail existe). Intervalo mínimo de 60 s entre envios para o mesmo usuário. Com o teto diário de e-mails atingido, não envia, mas responde igual.',
     security: PUBLICA,
     response: {
       200: json('Resposta genérica', MENSAGEM),
@@ -285,6 +286,7 @@ const ROTAS: Record<string, DocRota> = {
       400: erro('Corpo inválido'),
       403: erro('E-mail ainda não verificado (`EMAIL_NOT_VERIFIED`)'),
       404: erro('E-mail não cadastrado (`USER_NOT_FOUND`)'),
+      429: erro('Teto diário de e-mails atingido (`EMAIL_LIMIT_REACHED`)'),
       500: erro('Falha ao enviar o e-mail'),
     },
   },

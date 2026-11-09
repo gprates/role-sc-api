@@ -7,6 +7,7 @@ import * as verificationRepo from '../database/repositories/emailVerification.re
 import * as resetCodeRepo from '../database/repositories/passwordResetCode.repository.js';
 import * as resetTokenRepo from '../database/repositories/passwordResetToken.repository.js';
 import * as emailService from './email.service.js';
+import * as rateLimit from './rateLimit.service.js';
 import { signToken } from '../utils/jwt.utils.js';
 import { createLogger } from '../utils/logger.utils.js';
 import { isStrongPassword } from '../utils/passwordValidator.js';
@@ -44,8 +45,26 @@ async function issueVerificationToken(userId: ObjectId): Promise<string> {
   return token;
 }
 
+// 429 do teto diário global de e-mails (rateLimit.consumeDailyEmailQuota).
+function makeEmailLimitError(message: string): Error & { statusCode: number; code: string } {
+  const error = new Error(message) as Error & { statusCode: number; code: string };
+  error.statusCode = 429;
+  error.code = 'EMAIL_LIMIT_REACHED';
+  return error;
+}
+
+function makeRegisterIpLimitError(): Error & { statusCode: number; code: string } {
+  const error = new Error(
+    'Muitos cadastros feitos a partir desta rede. Tente novamente mais tarde ou entre com o Google.',
+  ) as Error & { statusCode: number; code: string };
+  error.statusCode = 429;
+  error.code = 'TOO_MANY_REGISTRATIONS';
+  return error;
+}
+
 export async function register(
   body: RegisterBody,
+  ip: string,
 ): Promise<{ success: true; message: string }> {
   const existing = await userRepo.findByEmail(body.email);
   if (existing) {
@@ -59,6 +78,15 @@ export async function register(
   // pessoa ficaria com uma senha que ela nunca conseguiria repetir ao trocar.
   if (!isStrongPassword(body.senha)) {
     throw makeWeakPasswordError();
+  }
+
+  // Limite por IP antes do teto global: um IP abusivo não consome a cota
+  // diária de todo mundo.
+  if (!(await rateLimit.consumeRegisterIpQuota(ip))) {
+    throw makeRegisterIpLimitError();
+  }
+  if (!(await rateLimit.consumeDailyEmailQuota())) {
+    throw makeEmailLimitError('Cadastro por e-mail indisponível no momento. Entre com o Google.');
   }
 
   const hashedPassword = await bcrypt.hash(body.senha, SALT_ROUNDS);
@@ -227,6 +255,12 @@ export async function resendVerification(
     return genericResponse;
   }
 
+  // Teto diário atingido: não envia, mas mantém a resposta genérica (um 429
+  // aqui revelaria que o email existe). O token anterior continua válido.
+  if (!(await rateLimit.consumeDailyEmailQuota())) {
+    return genericResponse;
+  }
+
   await verificationRepo.deleteByUserId(userId);
 
   let token: string;
@@ -317,6 +351,12 @@ export async function forgotPassword(
       message:
         'Já enviamos um código recentemente. Aguarde alguns instantes antes de pedir outro.',
     };
+  }
+
+  if (!(await rateLimit.consumeDailyEmailQuota())) {
+    throw makeEmailLimitError(
+      'Recuperação de senha por e-mail indisponível no momento. Tente novamente amanhã ou entre com o Google.',
+    );
   }
 
   await resetCodeRepo.deleteByUserId(userId);
